@@ -17,12 +17,14 @@ and storing both practice and finalized work.
 
 ## Folder Structure
 
+```
 UF-IFAS/
 ├── projects/     # Polished, finalized work ready to share
 ├── practice/     # Personal folders for practice and rough work
 │   ├── MichaelFox/
 │   └── YourName/
 └── data/         # Shared datasets
+```
 
 **projects/** — Put work here when it's clean and presentable. 
 This is the showcase folder.
