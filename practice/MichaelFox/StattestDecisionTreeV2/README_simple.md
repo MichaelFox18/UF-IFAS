@@ -1,5 +1,19 @@
 # StatGuide — Statistical Test Selector (Simple Version)
 
+## Running the App
+
+**RStudio:** Open `app.R` and click **Run App**, or select all and press `Ctrl+Enter`.
+
+**VS Code:** Press `Ctrl+Shift+B` to run the pre-configured "Run StatGuide" task, which launches the app in your browser.
+- For a line-by-line interactive experience in VS Code (like RStudio), install the [R extension](https://marketplace.visualstudio.com/items?itemName=REditorSupport.r). It adds an R console panel and lets you send code with `Ctrl+Enter`.
+
+**Terminal:**
+```r
+Rscript practice/MichaelFox/StattestDecisionTreeV2/app.R
+```
+
+---
+
 ## Overview
 A single-file R Shiny app (`app.R`) that helps students and researchers pick the right statistical test. It walks users through a step-by-step decision tree based on their data characteristics and returns ranked test recommendations. Audience: undergrad and graduate students.
 

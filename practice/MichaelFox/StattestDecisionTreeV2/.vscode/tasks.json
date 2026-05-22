@@ -5,9 +5,9 @@
       "label": "Run StatGuide",
       "type": "shell",
       "command": "Rscript",
-      "args": ["run_app.R"],
+      "args": ["${workspaceFolder}/practice/MichaelFox/StattestDecisionTreeV2/run_app.R"],
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}/practice/MichaelFox/StattestDecisionTreeV2"
       },
       "group": {
         "kind": "build",
