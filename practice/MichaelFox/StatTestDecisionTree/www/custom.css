@@ -1,0 +1,461 @@
+/* ── StatGuide — UF Branding ───────────────────────────────────────── */
+:root {
+  --uf-orange:       #FA4616;
+  --uf-blue:         #003087;
+  --uf-orange-hover: #d93b10;
+  --uf-blue-hover:   #002060;
+  --uf-orange-light: #fff5f2;
+  --uf-blue-light:   #edf1f9;
+  --shadow-sm:       0 2px 8px rgba(0,0,0,0.08);
+  --shadow-md:       0 4px 16px rgba(0,0,0,0.12);
+  --radius:          12px;
+}
+
+/* ── Navbar ────────────────────────────────────────────────────────── */
+.navbar {
+  background-color: var(--uf-blue) !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.20);
+}
+.navbar .navbar-brand {
+  color: white !important;
+  font-weight: 700;
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+.navbar .nav-link {
+  color: rgba(255,255,255,0.85) !important;
+  font-weight: 500;
+  padding: 0.5rem 1rem !important;
+  border-radius: 6px;
+  transition: background 0.15s, color 0.15s;
+}
+.navbar .nav-link:hover {
+  color: white !important;
+  background: rgba(255,255,255,0.15);
+}
+.navbar .nav-link.active {
+  color: white !important;
+  background: rgba(255,255,255,0.20);
+  font-weight: 600;
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────── */
+.btn-primary {
+  background-color: var(--uf-orange) !important;
+  border-color:     var(--uf-orange) !important;
+  color: white !important;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 0.5rem 1.4rem;
+  transition: background 0.2s, transform 0.1s;
+}
+.btn-primary:hover, .btn-primary:focus {
+  background-color: var(--uf-orange-hover) !important;
+  border-color:     var(--uf-orange-hover) !important;
+  transform: translateY(-1px);
+}
+.btn-primary:active {
+  transform: translateY(0);
+}
+.btn-outline-secondary {
+  border-color: var(--uf-blue) !important;
+  color:        var(--uf-blue) !important;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 0.5rem 1.4rem;
+  transition: background 0.2s, color 0.2s;
+}
+.btn-outline-secondary:hover, .btn-outline-secondary:focus {
+  background-color: var(--uf-blue) !important;
+  color: white !important;
+}
+.btn-link {
+  color: var(--uf-blue);
+  text-decoration: none;
+  padding: 0;
+}
+.btn-link:hover {
+  color: var(--uf-orange);
+  text-decoration: underline;
+}
+
+/* ── Cards (general) ───────────────────────────────────────────────── */
+.card {
+  border: none !important;
+  border-radius: var(--radius) !important;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ── Wizard ────────────────────────────────────────────────────────── */
+.wizard-container {
+  max-width: 680px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+.wizard-card {
+  background: white;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  padding: 2rem 2.5rem;
+}
+.wizard-step-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #6c757d;
+  margin-bottom: 0.25rem;
+}
+.wizard-question {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--uf-blue);
+  line-height: 1.3;
+  margin-bottom: 1.5rem;
+}
+
+/* Choice cards */
+.wizard-choice {
+  display: block;
+  width: 100%;
+  padding: 1rem 1.25rem;
+  border: 2px solid #e9ecef;
+  border-radius: 10px;
+  background: white;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s, transform 0.12s;
+  margin-bottom: 0.6rem;
+  font-family: inherit;
+}
+.wizard-choice:hover {
+  border-color: var(--uf-blue);
+  background: var(--uf-blue-light);
+  transform: translateX(4px);
+}
+.wizard-choice.active {
+  border-color: var(--uf-orange) !important;
+  background: var(--uf-orange-light) !important;
+}
+.wizard-choice.active .choice-label {
+  color: var(--uf-orange);
+  font-weight: 700;
+}
+.choice-label {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #212529;
+  display: block;
+  margin-bottom: 0.1rem;
+}
+.choice-desc {
+  font-size: 0.85rem;
+  color: #6c757d;
+  display: block;
+}
+.wizard-choice.active .choice-desc {
+  color: #c23a10;
+}
+
+/* Progress bar */
+.progress {
+  height: 6px;
+  border-radius: 3px;
+  background: #e9ecef;
+  margin-bottom: 1.75rem;
+}
+.progress-bar {
+  background-color: var(--uf-orange) !important;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+/* Help / collapsible */
+.help-toggle-btn {
+  font-size: 0.875rem;
+  color: #6c757d;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.15s;
+}
+.help-toggle-btn:hover { color: var(--uf-blue); }
+.help-content {
+  background: #f8f9fa;
+  border-left: 3px solid var(--uf-blue);
+  border-radius: 0 8px 8px 0;
+  padding: 0.9rem 1.1rem;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  margin-top: 0.5rem;
+}
+.help-content ul { margin-bottom: 0; padding-left: 1.2rem; }
+.help-content li { margin-bottom: 0.3rem; }
+
+/* Wizard nav row */
+.wizard-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 1.75rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #f0f0f0;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.wizard-nav .btn-next {
+  margin-left: auto;
+}
+
+/* Error message */
+.wizard-error {
+  color: #dc3545;
+  font-size: 0.875rem;
+  margin-top: 0.5rem;
+  display: none;
+}
+.wizard-error.visible { display: block; }
+
+/* ── Results page ──────────────────────────────────────────────────── */
+.results-container {
+  max-width: 800px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+
+/* Test cards */
+.test-card {
+  border-left: 5px solid var(--uf-blue) !important;
+  border-radius: 0 var(--radius) var(--radius) 0 !important;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 1.5rem;
+  background: white;
+  overflow: hidden;
+}
+.test-card.best-fit {
+  border-left-color: var(--uf-orange) !important;
+}
+.test-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 1.25rem 1.5rem 0.75rem;
+  border-bottom: 1px solid #f0f0f0;
+}
+.test-card-body {
+  padding: 1.25rem 1.5rem;
+}
+.test-card-name {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--uf-blue);
+  margin: 0;
+}
+.test-card.best-fit .test-card-name {
+  color: #c23a10;
+}
+
+/* Badges */
+.badge-fit {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.badge-best {
+  background-color: var(--uf-orange);
+  color: white;
+}
+.badge-alt {
+  background-color: var(--uf-blue);
+  color: white;
+}
+
+/* Section labels inside test cards */
+.test-section-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #6c757d;
+  margin-bottom: 0.35rem;
+  margin-top: 1rem;
+  display: block;
+}
+.test-section-label:first-child { margin-top: 0; }
+
+.test-card ul {
+  padding-left: 1.2rem;
+  margin-bottom: 0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+.test-card p {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  margin-bottom: 0.5rem;
+}
+.test-card p:last-child { margin-bottom: 0; }
+
+/* Code blocks */
+pre {
+  background-color: #1b1f23 !important;
+  color: #e1e4e8 !important;
+  border-radius: 8px;
+  padding: 1.1rem 1.25rem;
+  font-size: 0.82rem;
+  overflow-x: auto;
+  margin: 0;
+  line-height: 1.55;
+  border: none;
+}
+code {
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+}
+
+/* Answer summary */
+.answer-summary {
+  background: var(--uf-blue-light);
+  border: 1px solid #c5d0e8;
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+.answer-chip {
+  display: inline-block;
+  background: white;
+  border: 1.5px solid var(--uf-blue);
+  color: var(--uf-blue);
+  border-radius: 20px;
+  padding: 3px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin: 3px 4px 3px 0;
+}
+.answer-chip .chip-label {
+  color: #6c757d;
+  font-weight: 500;
+  margin-right: 4px;
+}
+
+/* Note box */
+.recommendation-note {
+  background: #fffbea;
+  border-left: 4px solid #ffc107;
+  border-radius: 0 8px 8px 0;
+  padding: 0.7rem 1rem;
+  font-size: 0.875rem;
+  margin-bottom: 1.25rem;
+  line-height: 1.55;
+}
+
+/* No-results state */
+.no-results-box {
+  background: #f8f9fa;
+  border: 2px dashed #dee2e6;
+  border-radius: var(--radius);
+  padding: 3rem 2rem;
+  text-align: center;
+  color: #6c757d;
+}
+
+/* ── Glossary ───────────────────────────────────────────────────────── */
+.glossary-search-box {
+  position: relative;
+  max-width: 480px;
+  margin-bottom: 1.5rem;
+}
+.glossary-term-card {
+  padding: 0.9rem 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+.glossary-term-card:last-child { border-bottom: none; }
+.glossary-term-heading {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--uf-blue);
+  margin-bottom: 0.2rem;
+}
+.glossary-term-def {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #444;
+  margin: 0;
+}
+.glossary-term-card.highlighted {
+  background: var(--uf-orange-light);
+  border-radius: 8px;
+  padding: 0.9rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.glossary-section-letter {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--uf-blue);
+  padding: 0.75rem 0 0.4rem;
+  border-bottom: 2px solid var(--uf-blue);
+  margin-bottom: 0.25rem;
+  margin-top: 0.5rem;
+}
+
+/* Glossary link inside wizard/results */
+.glossary-link {
+  color: var(--uf-blue);
+  text-decoration: underline dotted var(--uf-blue);
+  cursor: pointer;
+  font-style: italic;
+}
+.glossary-link:hover {
+  color: var(--uf-orange);
+  text-decoration: underline solid var(--uf-orange);
+}
+
+/* ── About page ─────────────────────────────────────────────────────── */
+.about-container {
+  max-width: 760px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+.about-step {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+  align-items: flex-start;
+}
+.about-step-num {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--uf-orange);
+  color: white;
+  font-weight: 700;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Utilities ──────────────────────────────────────────────────────── */
+.text-uf-blue   { color: var(--uf-blue) !important; }
+.text-uf-orange { color: var(--uf-orange) !important; }
+.bg-uf-blue     { background-color: var(--uf-blue) !important; }
+.divider        { height: 1px; background: #f0f0f0; margin: 1.5rem 0; }
+
+/* ── Mobile ─────────────────────────────────────────────────────────── */
+@media (max-width: 576px) {
+  .wizard-card { padding: 1.25rem 1.1rem; }
+  .wizard-question { font-size: 1.2rem; }
+  .wizard-choice { padding: 0.85rem 1rem; }
+  .test-card-header { flex-direction: column; align-items: flex-start; }
+  .about-container, .results-container, .wizard-container { padding: 0 0.5rem; }
+}

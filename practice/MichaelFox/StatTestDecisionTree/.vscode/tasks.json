@@ -1,0 +1,46 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "R: Run StatGuide App",
+      "type": "shell",
+      "command": "${env:LOCALAPPDATA}\\Programs\\R\\R-4.6.0\\bin\\Rscript.exe",
+      "args": ["run_app.R"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Loading required package",
+          "endsPattern": "Listening on http"
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "R: Install Packages",
+      "type": "shell",
+      "command": "${env:LOCALAPPDATA}\\Programs\\R\\R-4.6.0\\bin\\Rscript.exe",
+      "args": ["install_packages.R"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
