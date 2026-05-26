@@ -1,10 +1,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # StatGuide — Statistical Test Selector (Single-file version)
+#
+# To run: open this file in RStudio and click "Run App", or run
+#   shiny::runApp("app.R")
+# from an R console in this folder. Missing packages will install automatically.
 # ─────────────────────────────────────────────────────────────────────────────
+
+required_pkgs <- c("shiny", "bslib", "shinyjs")
+missing_pkgs  <- setdiff(required_pkgs, rownames(installed.packages()))
+if (length(missing_pkgs) > 0) {
+  message("StatGuide: installing missing packages: ",
+          paste(missing_pkgs, collapse = ", "))
+  install.packages(missing_pkgs, repos = "https://cloud.r-project.org")
+}
 
 library(shiny)
 library(bslib)
-library(shinyWidgets)
 library(shinyjs)
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
