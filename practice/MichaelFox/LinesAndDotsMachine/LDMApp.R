@@ -39,6 +39,12 @@ ui <- fluidPage(
       .metric-label { color: #444; }
       .plot-hint { font-size: 0.97rem; color: #555; margin-bottom: 6px; font-style: italic; }
       .func-desc { font-size: 0.82rem; color: #666; font-style: italic; margin: -6px 0 8px 0; }
+      .equation { font-size: 1.15rem; color: #0d3b66; font-family: 'Cambria Math', 'Times New Roman', serif;
+                  font-style: italic; padding: 6px 8px 10px 0; border-bottom: 1px solid #ececec;
+                  margin: 2px 0 10px 0; }
+      .about-section { padding: 4px 4px 12px; }
+      .about-section h4 { color: #0d3b66; margin-top: 18px; }
+      .about-section p, .about-section li { color: #222; line-height: 1.5; }
       .info-icon {
         display: inline-block;
         width: 15px; height: 15px;
@@ -255,6 +261,61 @@ ui <- fluidPage(
           )
         )
       )
+    ),
+
+    # ---- Tab 3: About --------------------------------------------------------
+    tabPanel(
+      title = "About",
+      value = "tab3",
+      fluidRow(
+        column(10, offset = 1,
+          wellPanel(
+            div(class = "about-section",
+              tags$h3("About Regression Explorer"),
+              tags$p("Regression Explorer is an interactive teaching tool for building intuition about how linear and polynomial regression work. You can experiment from two directions: place data points and watch a curve fit them, or define a true relationship and watch a noisy sample emerge from it. The contrast between the two perspectives is the point -- regression is easier to understand when you have seen both sides of the same coin."),
+
+              tags$h4("Tab 1 -- Data to Line"),
+              tags$p("Construct a dataset by hand, then fit a regression curve to it. Useful for exploring what 'best fit' means, how data shape constrains the fitted line, and what happens when you ask a model to do too much with too little."),
+              tags$ol(
+                tags$li(tags$b("Add points."), " Use click-to-add mode to drop points directly on the plot, or switch to manual entry and type X and Y values."),
+                tags$li(tags$b("Choose a polynomial degree."), " Degree 1 is a straight line. Degrees 2 through 5 allow curvature. With only a few points, a high-degree curve will pass through every one of them but generalize poorly -- this is overfitting."),
+                tags$li(tags$b("Press 'Fit regression'."), " The fitted equation, coefficients, R-squared, adjusted R-squared, and residual standard error appear below the controls."),
+                tags$li(tags$b("Show the confidence and prediction bands."), " The 95% CI shows where the true line likely lies; the 95% PI shows where a new observation likely falls. PI is always wider."),
+                tags$li(tags$b("Read the residuals plot."), " A good fit produces residuals scattered randomly around zero. Curved patterns mean the wrong model shape; fan shapes mean the noise level is not constant.")
+              ),
+
+              tags$h4("Tab 2 -- Line to Data"),
+              tags$p("Define a 'true' relationship between x and y, then generate a random sample drawn from it. The app fits a straight OLS line to whatever sample you generate -- so you can directly observe what happens when OLS is the wrong tool for the job."),
+              tags$ol(
+                tags$li(tags$b("Pick a function type"), " (linear, quadratic, exponential, logarithmic, or sine) and set its parameters."),
+                tags$li(tags$b("Choose sample size and noise level."), " Larger samples produce tighter estimates; more noise produces more scatter around the true curve."),
+                tags$li(tags$b("Adjust heteroskedasticity."), " Slide right to make noise grow with the magnitude of x, producing a funnel shape. OLS assumes constant noise, so the residuals plot will reveal the violation."),
+                tags$li(tags$b("Press 'Generate sample'."), " Each click draws a fresh random sample. Run it a few times in a row to see how much the OLS fit jumps around between samples."),
+                tags$li(tags$b("Compare true vs. fitted."), " When the true function is non-linear, the straight OLS line will be visibly wrong and the residuals will show a clear curved pattern -- exactly the kind of diagnostic clue you would look for in real data.")
+              ),
+
+              tags$h4("Key concepts you will see"),
+              tags$ul(
+                tags$li(tags$b("R-squared (R²):"), " The proportion of variation in y explained by the model. Between 0 and 1; higher is better, but adding terms always inflates it."),
+                tags$li(tags$b("Adjusted R-squared:"), " R-squared penalized for model complexity. Improves only when a new term genuinely helps -- use it when comparing models of different degrees."),
+                tags$li(tags$b("Residual:"), " The vertical distance between an observed point and the value the model predicts for it. The residuals plot is where assumption violations show up most clearly."),
+                tags$li(tags$b("Confidence band (95% CI):"), " The range where the true regression line is likely to lie. Narrowest near the center of your data, wider at the edges."),
+                tags$li(tags$b("Prediction band (95% PI):"), " The range where a single new observation is likely to fall. Always wider than the CI because it includes the natural scatter around the line."),
+                tags$li(tags$b("Homoskedasticity vs. heteroskedasticity:"), " Whether the spread of residuals stays constant across x. OLS assumes it does; a fan-shaped residuals plot says it does not.")
+              ),
+
+              tags$h4("Tips for using this tool"),
+              tags$ul(
+                tags$li("Hover over any small (i) icon in the app for a short explanation of that option."),
+                tags$li("In Tab 1, try fitting the same handful of points at degree 1, 3, and 5 to see overfitting in action."),
+                tags$li("In Tab 2, regenerate the same sample several times in a row -- you will see how much OLS estimates wander from one sample to the next, even with everything else held constant."),
+                tags$li("Both tabs let you download the current dataset as a CSV, which is useful for practice exercises or for moving data into other tools."),
+                tags$li("Click the camera icon in any plot toolbar to save it as a PNG.")
+              )
+            )
+          )
+        )
+      )
     )
   )
 )
@@ -293,6 +354,25 @@ metric_row <- function(label, value, tip = NULL) {
     span(class = "metric-label", lbl_content),
     span(class = "card-value",   value)
   )
+}
+
+# Render a fitted polynomial as a readable equation.
+# coefs: numeric vector c(b0, b1, b2, ...) where b0 is the intercept.
+# Returns an HTML object suitable for inclusion in a tag.
+format_equation <- function(coefs) {
+  coefs <- round(coefs, 4)
+  parts <- character(length(coefs))
+  parts[1] <- format(coefs[1], trim = TRUE)
+  if (length(coefs) >= 2) {
+    for (i in 2:length(coefs)) {
+      power    <- i - 1
+      v        <- coefs[i]
+      sign_str <- if (v >= 0) " + " else " &minus; "
+      x_part   <- if (power == 1) "x" else paste0("x<sup>", power, "</sup>")
+      parts[i] <- paste0(sign_str, format(abs(v), trim = TRUE), " ", x_part)
+    }
+  }
+  HTML(paste0("y &asymp; ", paste(parts, collapse = "")))
 }
 
 # ---- Server ------------------------------------------------------------------
@@ -479,6 +559,7 @@ server <- function(input, output, session) {
     tagList(
       div(class = "card",
         div(class = "card-title", paste0("Fitted polynomial (degree ", degree, ")")),
+        div(class = "equation", format_equation(coef_vals)),
         tagList(coef_rows)
       ),
       div(class = "card",
@@ -679,6 +760,7 @@ server <- function(input, output, session) {
           "Fitted OLS line",
           info_tip("Ordinary Least Squares always fits a straight line through the data. When the true function is non-linear, this line is misspecified -- R-squared will be low and residuals will show a curved pattern rather than random scatter.")
         ),
+        div(class = "equation", format_equation(c(fc[1, 1], fc[2, 1]))),
         metric_row("Slope (m)",     round(fc[2, 1], 4)),
         metric_row("Intercept (b)", round(fc[1, 1], 4))
       ),
