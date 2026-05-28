@@ -20,6 +20,21 @@ UF_BLUE   <- "#003087"
 UF_ORANGE <- "#FA4616"
 MP_COLORS <- c(UF_BLUE, UF_ORANGE, "#2ca25f", "#8856a7")
 
+# Above this many rows the Visualize tab renders static (fast) plots instead
+# of interactive plotly ones. ggplotly() gets slow well before a few thousand
+# points (scatter/line/box draw one mark per row) and can make the whole
+# single-threaded app appear frozen, so keep this conservative.
+BIG_ROWS <- 1000
+
+# Pie charts become unreadable with many slices, so categories beyond this
+# many are grouped into a single "Other" slice.
+PIE_MAX <- 12
+
+# ColorBrewer "Set1"/"Set2" run out of colours past 8-9 levels (extra levels
+# render as invisible NA), so switch to viridis (which scales to any count)
+# above this many discrete groups.
+BREWER_MAX <- 8
+
 # ----------------------------------------------------------
 # Helper functions
 # ----------------------------------------------------------
@@ -214,18 +229,42 @@ build_full_plot <- function(df, p) {
             summarise(val_ = sum(.data[[yv]], na.rm = TRUE), .groups = "drop")
     }
     names(pie_df)[1] <- "cat_"
-    pie_df$cat_   <- as.factor(pie_df$cat_)
-    pie_df$label_ <- paste0(pie_df$cat_, "\n", pct_label(pie_df$val_))
+    pie_df$cat_ <- as.character(pie_df$cat_)
+
+    # Too many slices are unreadable: keep the biggest PIE_MAX - 1 and roll the
+    # rest into a single "Other" slice.
+    lumped <- nrow(pie_df) > PIE_MAX
+    if (lumped) {
+      pie_df <- pie_df[order(pie_df$val_, decreasing = TRUE), ]
+      keep   <- pie_df[seq_len(PIE_MAX - 1), ]
+      other  <- data.frame(cat_ = "Other", val_ = sum(pie_df$val_[-seq_len(PIE_MAX - 1)]))
+      pie_df <- rbind(keep, other)
+    }
+    pie_df$cat_ <- factor(pie_df$cat_, levels = pie_df$cat_)
+    # Only label slices big enough to read; the legend covers the rest.
+    pct <- pie_df$val_ / sum(pie_df$val_) * 100
+    pie_df$label_ <- ifelse(pct >= 5, paste0(pie_df$cat_, "\n", round(pct, 1), "%"), "")
+
+    n_slices   <- nrow(pie_df)
+    fill_scale <- if (n_slices <= BREWER_MAX)
+                    scale_fill_brewer(palette = "Set2", name = xv)
+                  else
+                    scale_fill_viridis_d(name = xv)
+    subtitle <- if (lumped)
+      paste0("Showing the ", PIE_MAX - 1, " largest categories; the rest are grouped as “Other”.")
+    else NULL
+
     return(
       ggplot(pie_df, aes(x = "", y = val_, fill = cat_)) +
         geom_col(width = 1, color = "white", linewidth = 0.5) +
         coord_polar("y", start = 0) +
         geom_text(aes(label = label_), position = position_stack(vjust = 0.5),
                   size = 3.5, color = "white", fontface = "bold") +
-        scale_fill_brewer(palette = "Set2", name = xv) +
-        labs(title = title) +
+        fill_scale +
+        labs(title = title, subtitle = subtitle) +
         theme_void(base_size = 13) +
-        theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        theme(plot.title    = element_text(hjust = 0.5, face = "bold", size = 14),
+              plot.subtitle = element_text(hjust = 0.5, size = 10, color = "#666"),
               legend.position = "right", legend.title = element_text(size = 11))
     )
   }
@@ -235,6 +274,8 @@ build_full_plot <- function(df, p) {
   if (!is.null(cv)) {
     if (is.numeric(df[[cv]]) && dplyr::n_distinct(df[[cv]]) > 10) {
       p_obj <- p_obj + scale_color_viridis_c() + scale_fill_viridis_c()
+    } else if (dplyr::n_distinct(df[[cv]]) > BREWER_MAX) {
+      p_obj <- p_obj + scale_color_viridis_d() + scale_fill_viridis_d()
     } else {
       p_obj <- p_obj + scale_color_brewer(palette = "Set1") +
                        scale_fill_brewer(palette = "Set1")
@@ -311,6 +352,8 @@ generate_code <- function(df, p) {
   if (!is.null(cv)) {
     if (is.numeric(df[[cv]]) && dplyr::n_distinct(df[[cv]]) > 10)
       scale_line <- if (uses_color) "scale_color_viridis_c()" else "scale_fill_viridis_c()"
+    else if (dplyr::n_distinct(df[[cv]]) > BREWER_MAX)
+      scale_line <- if (uses_color) "scale_color_viridis_d()" else "scale_fill_viridis_d()"
     else
       scale_line <- if (uses_color) 'scale_color_brewer(palette = "Set1")'
                     else            'scale_fill_brewer(palette = "Set1")'
@@ -343,11 +386,15 @@ generate_code <- function(df, p) {
                             bq(xv), bq(yv)))
     }
     pre <- c(pre, sprintf('plot_df[["%s"]] <- as.factor(plot_df[["%s"]])', xv, xv))
+    pie_fill <- if (dplyr::n_distinct(df[[xv]]) <= BREWER_MAX)
+                  'scale_fill_brewer(palette = "Set2")'
+                else
+                  'scale_fill_viridis_d()'
     code <- paste0(
       sprintf('ggplot(plot_df, aes(x = "", y = val, fill = %s)) +', bq(xv)),
       '\n  geom_col(width = 1, color = "white") +',
       '\n  coord_polar("y") +',
-      '\n  scale_fill_brewer(palette = "Set2") +',
+      '\n  ', pie_fill, ' +',
       '\n  theme_void()',
       if (!is.null(title)) paste0(' +\n  labs(title = ', qq(title), ')') else ''
     )
@@ -903,7 +950,9 @@ server <- function(input, output, session) {
       idx <- i
       output[[paste0("ui_mp", idx, "_x")]] <- renderUI({
         req(rv$data)
-        selectInput(paste0("mp", idx, "_xvar"), "X Variable", choices = cols_all())
+        ty  <- input[[paste0("mp", idx, "_type")]]
+        lbl <- if (!is.null(ty) && ty == "pie") "Category (one slice per value)" else "X Variable"
+        selectInput(paste0("mp", idx, "_xvar"), lbl, choices = cols_all())
       })
       output[[paste0("ui_mp", idx, "_y")]] <- renderUI({
         req(rv$data)
@@ -911,8 +960,12 @@ server <- function(input, output, session) {
         req(ty)
         if (ty == "histogram")
           return(helpText("Histograms use only an X variable."))
-        ch <- if (ty == "pie") c("(Count categories)" = "__count__", cols_num()) else cols_num()
-        selectInput(paste0("mp", idx, "_yvar"), "Y Variable", choices = ch)
+        if (ty == "pie")
+          return(selectInput(paste0("mp", idx, "_yvar"),
+            label = tags$span("Slice Size",
+              info_icon("Optional. By default each slice is the COUNT of rows in that category. Pick a numeric variable to size slices by its SUM within each category instead.")),
+            choices = c("Count of each category" = "__count__", cols_num())))
+        selectInput(paste0("mp", idx, "_yvar"), "Y Variable", choices = cols_num())
       })
       output[[paste0("ui_mp", idx, "_color")]] <- renderUI({
         req(rv$data)
@@ -983,14 +1036,28 @@ server <- function(input, output, session) {
     req(rv$data)
     n <- as.integer(input$n_plots %||% 1)
     ph <- if (n == 1) "470px" else "330px"
+    big <- nrow(rv$data) > BIG_ROWS
     cards <- lapply(seq_len(n), function(i) {
+      plot_ui <- if (big) {
+        tagList(
+          plotOutput(paste0("mp_st", i), height = ph),
+          tags$div(class = "form-text",
+                   sprintf("Static view (%s rows). Interactive zoom/hover is disabled above %s rows for responsiveness; exports use all rows.",
+                           format(nrow(rv$data), big.mark = ","),
+                           format(BIG_ROWS, big.mark = ",")))
+        )
+      } else {
+        tagList(
+          conditionalPanel(sprintf("input.mp%d_type != 'pie'", i),
+                           plotlyOutput(paste0("mp_ly", i), height = ph)),
+          conditionalPanel(sprintf("input.mp%d_type == 'pie'", i),
+                           plotOutput(paste0("mp_st", i), height = ph))
+        )
+      }
       card(
         full_screen = TRUE,
         card_header(paste("Plot", i)),
-        conditionalPanel(sprintf("input.mp%d_type != 'pie'", i),
-                         plotlyOutput(paste0("mp_ly", i), height = ph)),
-        conditionalPanel(sprintf("input.mp%d_type == 'pie'", i),
-                         plotOutput(paste0("mp_st", i), height = ph)),
+        plot_ui,
         accordion(
           open = FALSE,
           accordion_panel(
