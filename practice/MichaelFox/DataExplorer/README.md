@@ -9,34 +9,41 @@ This app allows users to upload their own data (or use the built-in `mtcars` dem
 ## Features
 
 ### Import Data
-Upload a CSV, TSV, or plain-text file, or use the built-in `mtcars` demo. Supports comma, tab, semicolon, and pipe delimiters. The raw data table is displayed on load.
+Upload a CSV, TSV, plain-text, Excel (`.xlsx` / `.xls`), or `.rds` file, or load the built-in `mtcars` demo. Text files support comma, semicolon, tab, and space delimiters and either decimal point convention. The raw data table and a per-column summary are displayed on load.
 
 ### Visualize
-Build interactive charts from any numeric columns in your dataset. Supported plot types:
-- **Scatter plot** — with optional color/group-by variable
-- **Line graph** — with optional group-by variable
-- **Histogram** — with optional grouped coloring (discrete variables only)
-- **Bar chart** — count or mean aggregation, with optional grouped/dodged bars
-- **Box plot** — with optional fill/group-by variable
+Build one to four charts at once from any columns in your dataset. Use the **Number of plots** selector (1–4); each plot gets its own collapsible panel with the full set of controls:
 
-Controls include point/bar size, custom color picker (for ungrouped plots), custom axis labels, and a plot title. Low-cardinality numeric variables (≤ 10 unique values) are automatically treated as categorical for grouping purposes.
+- **Chart types** — Scatter, Line, Bar, Histogram, Box Plot, Pie
+- **X / Y variables** and an optional **Color / Group By** variable
+- **Bar aggregation** (Sum / Mean / Median) when a bar chart has a Y variable
+- **Histogram bins**
+- **Labels** — title and custom X/Y axis labels
+- **Style** — theme, default color, and point/bar size
+- **Regression overlay** (scatter & line) — linear, polynomial, or loess fit with an optional 95% CI band
 
-### Multi-Plot
-Produce up to four plots simultaneously in a 2×2 grid. Each slot can be independently configured with a plot type, X and Y variables, and a title. All active plots are exported together as a single PNG at a user-selected DPI.
+Additional conveniences:
+
+- **Copy R code** — each plot has a "R code for this plot" panel with a runnable `ggplot2` snippet and a one-click copy button, so students can reuse the exact code elsewhere.
+- **Apply Plot 1 style to all** — copies Plot 1's theme, color, and size to the other plots for a consistent look.
+- **Smart grouping** — low-cardinality numeric variables (≤ 10 unique values, e.g. `cyl`) are treated as categorical so discrete palettes work; truly continuous variables are ignored for bar/histogram grouping (where per-row coloring would be meaningless).
 
 ### Regression
 Fit and interpret statistical models:
-- **Simple Linear** — one predictor, one response
-- **Multiple Linear** — multiple predictors, one response
-- **Logistic** — binary outcome classification
 
-Outputs include a coefficient table (estimate, std. error, t/z value, p-value), model summary statistics (R², F-statistic or AIC/BIC), fitted-vs-actual and residual plots, and an auto-generated plain-English interpretation of significance and model fit.
+- **Simple Linear** — one predictor, one response
+- **Multiple Linear** — two or more predictors, one response
+- **Polynomial** — a curved fit using powers of one predictor (selectable degree)
+
+Outputs include the full model summary (coefficient table with estimate, std. error, t-value, p-value; R², adjusted R², F-statistic), interactive fitted-vs-actual and residuals-vs-fitted plots, and an auto-generated plain-English interpretation of overall significance and per-predictor significance. The summary can be exported as a `.txt` file.
 
 ### Export
-Select any subset of columns to include in the export, then download as CSV or TSV. DPI can be configured for multi-plot image exports.
+**Plots** — exports exactly the 1–4 charts configured on the Visualize tab. With a single plot, download it directly; with multiple plots, choose **Combined image** (one file laid out in a grid) or **Separate files** (one download per plot). Supported formats are **PNG**, **PDF**, and **SVG**, with configurable per-plot width, height, and resolution (DPI).
+
+**Data** — select any subset of columns and download as CSV or Excel (`.xlsx`).
 
 ### Glossary
-Definitions for key statistical terms: p-value, R², standard error, t-value, F-statistic, AIC/BIC, residuals, fitted values, and more. Also covers model types, import file format options, and export DPI guidance.
+Plain-language definitions for key terms: regression model types, R² / adjusted R², F-statistic, residuals, confidence intervals, the coefficient-table columns (estimate, std. error, t-value, p-value, intercept), and the import/aggregation/DPI settings used throughout the app.
 
 ## Tech Stack
 
@@ -44,62 +51,54 @@ Definitions for key statistical terms: p-value, R², standard error, t-value, F-
 |---|---|
 | `shiny` | App framework |
 | `bslib` | Bootstrap 5 theme, layout components, tooltips |
-| `ggplot2` | Static plot construction |
+| `ggplot2` | Plot construction |
 | `plotly` / `ggplotly` | Interactive chart rendering |
-| `dplyr` | Data wrangling |
-| `readr` | File import |
-| `grid` | Multi-plot PNG export (base R viewports) |
+| `dplyr` | Data wrangling / aggregation |
+| `DT` | Interactive data tables |
+| `readxl` | Excel file import |
+| `writexl` | Excel file export |
+| `colourpicker` | Color picker inputs |
+| `grid` / `grDevices` | Multi-plot layout and PNG/PDF/SVG export (base R) |
 
 ## Running the App
 
 ```r
 # From RStudio or an R terminal
-shiny::runApp("practice/MichaelFox/DataExplorer/app.R")
+shiny::runApp("practice/MichaelFox/DataExplorer/DataExplorerApp.R")
 ```
 
-Or open `app.R` in RStudio and click **Run App**.
+Or open `DataExplorerApp.R` in RStudio and click **Run App**.
 
 > **Note:** If you have the app running in one terminal and make edits, open a new R terminal and re-run rather than reloading the existing session to avoid stale state.
 
-## Session Changes (v1.0 → current)
+## Changelog
 
-The following improvements were made during the initial development session:
+### Merged Visualize + Multi-Plot
+- Combined the former Visualize and Multi-Plot tabs into a single **Visualize** tab that builds 1–4 plots, each with the complete control set (chart type, variables, group-by, labels, style, and regression overlay).
+- Added an **Apply Plot 1 style to all** button to sync theme/color/size across plots.
 
-### Branding & UI
-- Applied UF IFAS color scheme throughout: **UF Blue** (`#003087`) and **UF Orange** (`#FA4616`)
-- Fixed plotly modebar (zoom/pan toolbar) overlapping regression plot titles by increasing top margin
-- Added contextual info tooltips (`ⓘ`) on regression inputs and other conceptual UI elements
+### Copy R code
+- Every plot now exposes a runnable `ggplot2` code snippet with a copy-to-clipboard button, generated to reproduce the on-screen chart (including grouping, aggregation, and regression overlays).
 
-### Regression Tab
-- Added plain-English statistical interpretation (significance, R², model fit quality)
-- Added info tooltips explaining regression methods, model types, and variable roles
-- Restricted Simple Linear predictor selector to a single variable (prevents multi-predictor selection)
-- Added residual and fitted-vs-actual interactive plots
+### Export
+- The Export tab now mirrors the 1–4 plots from Visualize, with a choice between a single combined image and separate per-plot files, in PNG, PDF, or SVG.
 
-### Visualize — Color/Group By Fixes
-- Restructured all geom calls to avoid passing `color = NULL` or `fill = NULL` as fixed aesthetics (eliminated "Ignoring empty aesthetic" warnings)
-- Fixed `labs()` to only set `color` or `fill` label depending on plot type (eliminated "Ignoring unknown labels" warnings)
-- Added automatic `as.factor()` conversion for low-cardinality numeric group variables (≤ 10 unique values), fixing crashes when grouping line graphs by variables like `cyl`
-- Added guard to null out group-by variable for histogram and bar chart when the variable is truly continuous (> 10 unique values), preventing broken per-observation coloring
-- Fixed bar width slider formula to span a useful range (0.2–0.9) rather than a narrow band
-- Added `position = "dodge"` for grouped bar charts so bars sit side-by-side instead of stacking
+### Group-by & bar charts
+- Bar charts with a Y variable now **aggregate** repeated categories (Sum / Mean / Median) instead of overlaying opaque identity bars.
+- Fixed pie charts breaking when the category column was numeric (now coerced to a factor).
+- Hardened group-by handling across all chart types.
 
-### Multi-Plot Tab
-- Added new tab supporting up to 4 simultaneous configurable plots
-- Implemented PNG export using base R `grid` viewports — avoids `patchwork` dependency and guarantees a valid PNG is always written (no more `.htm` error files)
-- Fixed `downloadHandler` to use `isolate()` instead of `req()` inside the `content` function, which was silently aborting and causing Shiny to return an HTML error page saved as `.htm`
-
-### Export Tab
-- Replaced automatic "used variables" tracking with a user-selectable column picker, allowing export of any columns including string/character variables
-
-### Glossary Tab
-- Moved to last tab position (after Export)
-- Expanded with entries for: all three model types, text file format options (CSV/TSV/pipe/semicolon), export DPI guidance, and additional statistical terms
+### Earlier session (v1.0 → current)
+- Applied the UF IFAS color scheme (UF Blue `#003087`, UF Orange `#FA4616`).
+- Added plain-English regression interpretation, info tooltips, and residual/fitted plots.
+- Restructured geoms and `labs()` to eliminate empty-aesthetic and unknown-label warnings.
+- Replaced automatic export-column tracking with a user-selectable column picker.
+- Expanded the Glossary and moved it to the last tab.
 
 ## File Structure
 
 ```
 DataExplorer/
-├── app.R       # Full Shiny application (UI + server in one file)
-└── README.md   # This file
+├── DataExplorerApp.R   # Full Shiny application (UI + server in one file)
+└── README.md           # This file
 ```
