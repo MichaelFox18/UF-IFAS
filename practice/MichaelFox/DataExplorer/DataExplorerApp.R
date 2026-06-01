@@ -35,6 +35,11 @@ PIE_MAX <- 12
 # above this many discrete groups.
 BREWER_MAX <- 8
 
+# Bar charts with more than this many categories become an unreadable picket
+# fence, so the largest BAR_MAX are kept and the rest are rolled into a single
+# "Other" bar (mirroring the pie-chart behaviour above).
+BAR_MAX <- 30
+
 # ----------------------------------------------------------
 # Helper functions
 # ----------------------------------------------------------
@@ -83,13 +88,192 @@ theme_call <- function(name, base_size = 13) {
 }
 
 # ----------------------------------------------------------
+# Chart-suitability helpers — keep questionable variable/chart
+# pairings from producing the "strange-looking" plots that come
+# from feeding the wrong data type into a chart.
+# ----------------------------------------------------------
+
+# Column-type predicates.
+is_discrete_col <- function(x) is.character(x) || is.factor(x) || is.logical(x)
+is_date_col     <- function(x) inherits(x, c("Date", "POSIXct", "POSIXt"))
+
+# A discrete x-axis with many or long labels gets its ticks angled so they
+# stay legible instead of overlapping into mush.
+needs_x_rotation <- function(df, pt, xv) {
+  if (is.null(xv) || pt == "pie" || !xv %in% names(df)) return(FALSE)
+  x <- df[[xv]]
+  if (!(pt %in% c("bar", "boxplot") || is_discrete_col(x))) return(FALSE)
+  uvals <- unique(as.character(x))
+  length(uvals) > 8 || max(nchar(uvals), 0L) > 10
+}
+
+# Keep the top `n_keep` categories (by count, or by summed weight `w` when a Y
+# variable is present) and roll everything else into a single "Other" bar.
+lump_bar_x <- function(df, xv, w, n_keep) {
+  x   <- as.character(df[[xv]])
+  wt  <- if (is.null(w)) rep(1, length(x)) else w
+  tot <- sort(tapply(wt, x, function(z) sum(z, na.rm = TRUE)), decreasing = TRUE)
+  keep <- names(tot)[seq_len(min(n_keep, length(tot)))]
+  x[!x %in% keep] <- "Other"
+  df[[xv]] <- factor(x, levels = unique(c(keep, "Other")))
+  df
+}
+
+# Returns an HTML warning when the chosen variable doesn't suit the chosen
+# chart type, or NULL when the pairing is fine. Shown inline under the variable
+# pickers so students learn *why* a chart looks off rather than just seeing a
+# mess (or an empty plot).
+chart_hint <- function(df, p) {
+  if (is.null(df) || is.null(p$type) || is.null(p$x) || !nzchar(p$x)) return(NULL)
+  if (!p$x %in% names(df)) return(NULL)
+  pt <- p$type
+  xv <- p$x
+  x  <- df[[xv]]
+  n_x    <- dplyr::n_distinct(x, na.rm = TRUE)
+  cont_x <- is.numeric(x) && !is_date_col(x) && n_x > 10
+
+  if (pt %in% c("scatter", "line") && is_discrete_col(x))
+    return(sprintf("<b>%s</b> is categorical. %s charts read best with a numeric or date X &mdash; a <b>box plot</b> or <b>bar chart</b> may show this better.",
+                   xv, tools::toTitleCase(pt)))
+  if (pt == "bar" && cont_x)
+    return(sprintf("<b>%s</b> looks continuous (%s distinct values), so a bar chart draws many thin bars. A <b>histogram</b> is usually the better choice for a numeric variable.",
+                   xv, format(n_x, big.mark = ",")))
+  if (pt == "boxplot" && cont_x)
+    return(sprintf("<b>%s</b> looks continuous, so you'll get one box per value. Box plots group a numeric Y by a <b>categorical</b> X.", xv))
+  if (pt == "pie" && cont_x)
+    return(sprintf("<b>%s</b> looks continuous, which makes an unreadable pie. Pie charts need a <b>categorical</b> variable with a handful of values.", xv))
+  barlim <- p$cat_limit %||% BAR_MAX
+  if (pt == "bar" && is_discrete_col(x) && n_x > barlim)
+    return(sprintf("<b>%s</b> has %s categories; only the largest %d are shown (the rest grouped as &ldquo;Other&rdquo;). Use the &ldquo;Maximum bars&rdquo; slider to show more or fewer.",
+                   xv, format(n_x, big.mark = ","), barlim))
+  NULL
+}
+
+# ----------------------------------------------------------
+# Palettes for the group-color picker. Discrete palettes are
+# recycled / ramped so they never run out of colours.
+# ----------------------------------------------------------
+
+PALETTES <- c("Automatic" = "auto", "UF Brand" = "uf", "Viridis" = "viridis",
+              "Colorblind-safe" = "cb", "ColorBrewer Set1" = "set1",
+              "ColorBrewer Set2" = "set2", "Greyscale" = "greys")
+
+okabe_ito  <- function(n) rep_len(
+  c("#E69F00", "#56B4E9", "#009E73", "#F0E442",
+    "#0072B2", "#D55E00", "#CC79A7", "#000000"), n)
+
+uf_discrete <- function(n) {
+  base <- c(UF_BLUE, UF_ORANGE, "#2ca25f", "#8856a7",
+            "#e6550d", "#3182bd", "#31a354", "#756bb1")
+  if (n <= length(base)) base[seq_len(n)]
+  else grDevices::colorRampPalette(c(UF_BLUE, UF_ORANGE))(n)
+}
+
+# Returns the color+fill scales for the chosen group palette. Both aesthetics
+# are returned so the geom picks up whichever it uses.
+group_scales <- function(df, cv, palette) {
+  is_cont <- is.numeric(df[[cv]]) && dplyr::n_distinct(df[[cv]]) > 10
+  n       <- dplyr::n_distinct(df[[cv]])
+  if (palette == "auto" || is.null(palette)) {
+    if (is_cont)          return(list(scale_color_viridis_c(), scale_fill_viridis_c()))
+    if (n > BREWER_MAX)   return(list(scale_color_viridis_d(), scale_fill_viridis_d()))
+    return(list(scale_color_brewer(palette = "Set1"), scale_fill_brewer(palette = "Set1")))
+  }
+  if (is_cont) {
+    if (palette == "uf")
+      return(list(scale_color_gradient(low = UF_BLUE, high = UF_ORANGE),
+                  scale_fill_gradient(low = UF_BLUE, high = UF_ORANGE)))
+    return(list(scale_color_viridis_c(), scale_fill_viridis_c()))
+  }
+  # Set1/Set2 produce NA fills past their size, so fall back to viridis.
+  if (palette %in% c("set1", "set2") && n > BREWER_MAX)
+    return(list(scale_color_viridis_d(), scale_fill_viridis_d()))
+  switch(palette,
+    uf      = list(scale_color_manual(values = uf_discrete(n)),
+                   scale_fill_manual(values  = uf_discrete(n))),
+    viridis = list(scale_color_viridis_d(), scale_fill_viridis_d()),
+    cb      = list(scale_color_manual(values = okabe_ito(n)),
+                   scale_fill_manual(values  = okabe_ito(n))),
+    set1    = list(scale_color_brewer(palette = "Set1"), scale_fill_brewer(palette = "Set1")),
+    set2    = list(scale_color_brewer(palette = "Set2"), scale_fill_brewer(palette = "Set2")),
+    greys   = list(scale_color_grey(start = 0.2, end = 0.75),
+                   scale_fill_grey(start = 0.2, end = 0.75)),
+    list(scale_color_brewer(palette = "Set1"), scale_fill_brewer(palette = "Set1")))
+}
+
+# Single fill scale for pie slices. "Automatic" keeps the historical Set2 /
+# viridis behaviour; the other names mirror the group palette picker.
+pie_fill_scale <- function(palette, n, name) {
+  if (palette %in% c("auto", "") || is.null(palette))
+    return(if (n <= BREWER_MAX) scale_fill_brewer(palette = "Set2", name = name)
+           else                 scale_fill_viridis_d(name = name))
+  if (palette %in% c("set1", "set2") && n > BREWER_MAX)
+    return(scale_fill_viridis_d(name = name))
+  switch(palette,
+    uf      = scale_fill_manual(values = uf_discrete(n), name = name),
+    viridis = scale_fill_viridis_d(name = name),
+    cb      = scale_fill_manual(values = okabe_ito(n), name = name),
+    set1    = scale_fill_brewer(palette = "Set1", name = name),
+    set2    = scale_fill_brewer(palette = "Set2", name = name),
+    greys   = scale_fill_grey(start = 0.2, end = 0.75, name = name),
+    scale_fill_brewer(palette = "Set2", name = name))
+}
+
+# Code-snippet form of group_scales() for a single aesthetic ("color"/"fill").
+palette_code <- function(palette, aes_fn, is_cont, n) {
+  s <- function(suffix, args = "") sprintf("scale_%s_%s(%s)", aes_fn, suffix, args)
+  vals <- function(cols) sprintf('values = c(%s)', paste(sprintf('"%s"', cols), collapse = ", "))
+  if (palette == "auto" || is.null(palette)) {
+    if (is_cont)        return(s("viridis_c"))
+    if (n > BREWER_MAX) return(s("viridis_d"))
+    return(s("brewer", 'palette = "Set1"'))
+  }
+  if (is_cont) {
+    if (palette == "uf") return(s("gradient", sprintf('low = "%s", high = "%s"', UF_BLUE, UF_ORANGE)))
+    return(s("viridis_c"))
+  }
+  if (palette %in% c("set1", "set2") && n > BREWER_MAX) return(s("viridis_d"))
+  switch(palette,
+    uf      = s("manual", vals(uf_discrete(n))),
+    viridis = s("viridis_d"),
+    cb      = s("manual", vals(okabe_ito(n))),
+    set1    = s("brewer", 'palette = "Set1"'),
+    set2    = s("brewer", 'palette = "Set2"'),
+    greys   = s("grey", "start = 0.2, end = 0.75"),
+    s("brewer", 'palette = "Set1"'))
+}
+
+# Builds the "y = a + b·x, R² = ..." annotation for a fitted scatter/line.
+trend_label_text <- function(df, xv, yv, meth, deg) {
+  d <- data.frame(x = df[[xv]], y = df[[yv]])
+  d <- d[stats::complete.cases(d), , drop = FALSE]
+  if (!is.numeric(d$x) || !is.numeric(d$y) || nrow(d) < 3) return(NULL)
+  if (meth == "loess") {
+    fit <- tryCatch(stats::loess(y ~ x, data = d), error = function(e) NULL)
+    if (is.null(fit)) return(NULL)
+    r2 <- 1 - sum(stats::residuals(fit)^2) / sum((d$y - mean(d$y))^2)
+    return(sprintf("loess fit,  R² = %.3f", r2))
+  }
+  fit <- if (meth == "poly")
+           tryCatch(stats::lm(y ~ poly(x, deg, raw = TRUE), data = d), error = function(e) NULL)
+         else
+           tryCatch(stats::lm(y ~ x, data = d), error = function(e) NULL)
+  if (is.null(fit)) return(NULL)
+  r2 <- summary(fit)$r.squared
+  if (meth == "poly") return(sprintf("polynomial (degree %d),  R² = %.3f", deg, r2))
+  co <- stats::coef(fit)
+  sprintf("y = %.3g %+.3g·x,  R² = %.3f", co[1], co[2], r2)
+}
+
+# ----------------------------------------------------------
 # Plot builder — one function used by every plot slot,
 # the Visualize previews, and the Export tab.
 #
 # p is a plain list of settings:
 #   type, x, y, color, title, xlab, ylab,
-#   theme, color_hex, size, bins, bar_agg,
-#   reg_overlay, reg_type, reg_deg, reg_ci, reg_col
+#   theme, color_hex, size, bins, bar_agg, cat_limit,
+#   reg_overlay, reg_type, reg_deg, reg_ci, reg_col, trend_label,
+#   palette, alpha, jitter, logscale, facet, legend_pos, gridlines, flip
 # ----------------------------------------------------------
 
 build_full_plot <- function(df, p) {
@@ -103,6 +287,7 @@ build_full_plot <- function(df, p) {
 
   if (pt %in% c("scatter", "line", "boxplot") && is.null(yv)) return(NULL)
   if (!is.null(yv) && !yv %in% names(df)) return(NULL)
+  if (pt == "histogram" && !is.numeric(df[[xv]])) return(NULL)
 
   # Group-by resolution:
   #  - low-cardinality numeric (<= 10 unique) -> treat as categorical so
@@ -117,13 +302,18 @@ build_full_plot <- function(df, p) {
     cv <- NULL
   }
 
-  size <- p$size %||% 2
-  col  <- p$color_hex %||% UF_BLUE
-  bins <- p$bins %||% 30
+  size  <- p$size %||% 2
+  col   <- p$color_hex %||% UF_BLUE
+  bins  <- p$bins %||% 30
+  alpha <- p$alpha %||% 0.8
+  legend_pos <- p$legend_pos %||% "right"
+  facet_v <- if (!is.null(p$facet) && nzchar(p$facet) &&
+                 p$facet != "__none__" && p$facet %in% names(df)) p$facet else NULL
 
   title <- if (!is.null(p$title) && nzchar(trimws(p$title))) p$title else NULL
   xlab  <- label_or(p$xlab %||% "", xv)
   ylab  <- if (!is.null(yv)) label_or(p$ylab %||% "", yv) else NULL
+  subtitle <- NULL
 
   smooth_layer <- function() {
     if (!isTRUE(p$reg_overlay)) return(NULL)
@@ -146,14 +336,17 @@ build_full_plot <- function(df, p) {
   if (pt == "scatter") {
     aes_m <- if (!is.null(cv)) aes(x = .data[[xv]], y = .data[[yv]], color = .data[[cv]])
              else               aes(x = .data[[xv]], y = .data[[yv]])
+    pt_geom <- if (isTRUE(p$jitter)) geom_jitter else geom_point
     p_obj <- ggplot(df, aes_m)
     p_obj <- if (is.null(cv))
-               p_obj + geom_point(size = size, alpha = 0.75, color = col)
+               p_obj + pt_geom(size = size, alpha = alpha, color = col)
              else
-               p_obj + geom_point(size = size, alpha = 0.75)
+               p_obj + pt_geom(size = size, alpha = alpha)
     p_obj <- p_obj + smooth_layer()
 
   } else if (pt == "line") {
+    # Lines connect points in row order, so an unsorted file draws a scribble.
+    df <- df[order(df[[xv]]), , drop = FALSE]
     aes_m <- if (!is.null(cv))
                aes(x = .data[[xv]], y = .data[[yv]], color = .data[[cv]], group = .data[[cv]])
              else
@@ -170,6 +363,15 @@ build_full_plot <- function(df, p) {
   } else if (pt == "bar") {
     has_y <- !is.null(yv)
     bw    <- bar_width(size)
+    # Too many categories make an unreadable picket fence: keep the biggest
+    # `barmax` and roll the rest into "Other" (only for genuine categories;
+    # a continuous numeric x is flagged by chart_hint instead). The user sets
+    # barmax with the "Maximum bars" slider; it defaults to BAR_MAX.
+    barmax <- p$cat_limit %||% BAR_MAX
+    if (is_discrete_col(df[[xv]]) && dplyr::n_distinct(df[[xv]]) > barmax) {
+      df <- lump_bar_x(df, xv, if (has_y) df[[yv]] else NULL, barmax)
+      subtitle <- sprintf("Showing the %d largest categories; the rest are grouped as “Other”.", barmax)
+    }
     if (has_y) {
       # Aggregate values per category (and group) so repeated x-values don't
       # stack opaque bars on top of each other.
@@ -183,9 +385,9 @@ build_full_plot <- function(df, p) {
                  aes(x = .data[[xv]], y = .data[[".value"]])
       p_obj <- ggplot(pdat, aes_m)
       p_obj <- if (is.null(cv))
-                 p_obj + geom_col(fill = col, width = bw, alpha = 0.85)
+                 p_obj + geom_col(fill = col, width = bw, alpha = alpha)
                else
-                 p_obj + geom_col(width = bw, alpha = 0.85, position = "dodge")
+                 p_obj + geom_col(width = bw, alpha = alpha, position = "dodge")
       ylab <- label_or(p$ylab %||% "",
                        paste0(tools::toTitleCase(p$bar_agg %||% "sum"), " of ", yv))
     } else {
@@ -193,19 +395,19 @@ build_full_plot <- function(df, p) {
                else               aes(x = .data[[xv]])
       p_obj <- ggplot(df, aes_m)
       p_obj <- if (is.null(cv))
-                 p_obj + geom_bar(stat = "count", fill = col, width = bw, alpha = 0.85)
+                 p_obj + geom_bar(stat = "count", fill = col, width = bw, alpha = alpha)
                else
-                 p_obj + geom_bar(stat = "count", width = bw, alpha = 0.85, position = "dodge")
+                 p_obj + geom_bar(stat = "count", width = bw, alpha = alpha, position = "dodge")
       ylab <- "Count"
     }
 
   } else if (pt == "histogram") {
     if (!is.null(cv)) {
       p_obj <- ggplot(df, aes(x = .data[[xv]], fill = .data[[cv]])) +
-               geom_histogram(bins = bins, color = "white", alpha = 0.75, position = "dodge")
+               geom_histogram(bins = bins, color = "white", alpha = alpha, position = "dodge")
     } else {
       p_obj <- ggplot(df, aes(x = .data[[xv]])) +
-               geom_histogram(bins = bins, color = "white", fill = col, alpha = 0.85)
+               geom_histogram(bins = bins, color = "white", fill = col, alpha = alpha)
     }
     ylab <- "Count"
 
@@ -214,10 +416,10 @@ build_full_plot <- function(df, p) {
              else               aes(x = .data[[xv]], y = .data[[yv]])
     p_obj <- ggplot(df, aes_m)
     p_obj <- if (is.null(cv))
-               p_obj + geom_boxplot(fill = col, alpha = 0.75,
+               p_obj + geom_boxplot(fill = col, alpha = alpha,
                                     outlier.size = size * 0.7, outlier.alpha = 0.6)
              else
-               p_obj + geom_boxplot(alpha = 0.75,
+               p_obj + geom_boxplot(alpha = alpha,
                                     outlier.size = size * 0.7, outlier.alpha = 0.6)
 
   } else if (pt == "pie") {
@@ -231,13 +433,15 @@ build_full_plot <- function(df, p) {
     names(pie_df)[1] <- "cat_"
     pie_df$cat_ <- as.character(pie_df$cat_)
 
-    # Too many slices are unreadable: keep the biggest PIE_MAX - 1 and roll the
-    # rest into a single "Other" slice.
-    lumped <- nrow(pie_df) > PIE_MAX
+    # Too many slices are unreadable: keep the biggest (pielim - 1) and roll the
+    # rest into a single "Other" slice. pielim comes from the "Maximum slices"
+    # slider and defaults to PIE_MAX.
+    pielim <- p$cat_limit %||% PIE_MAX
+    lumped <- nrow(pie_df) > pielim
     if (lumped) {
       pie_df <- pie_df[order(pie_df$val_, decreasing = TRUE), ]
-      keep   <- pie_df[seq_len(PIE_MAX - 1), ]
-      other  <- data.frame(cat_ = "Other", val_ = sum(pie_df$val_[-seq_len(PIE_MAX - 1)]))
+      keep   <- pie_df[seq_len(pielim - 1), ]
+      other  <- data.frame(cat_ = "Other", val_ = sum(pie_df$val_[-seq_len(pielim - 1)]))
       pie_df <- rbind(keep, other)
     }
     pie_df$cat_ <- factor(pie_df$cat_, levels = pie_df$cat_)
@@ -246,12 +450,9 @@ build_full_plot <- function(df, p) {
     pie_df$label_ <- ifelse(pct >= 5, paste0(pie_df$cat_, "\n", round(pct, 1), "%"), "")
 
     n_slices   <- nrow(pie_df)
-    fill_scale <- if (n_slices <= BREWER_MAX)
-                    scale_fill_brewer(palette = "Set2", name = xv)
-                  else
-                    scale_fill_viridis_d(name = xv)
+    fill_scale <- pie_fill_scale(p$palette %||% "auto", n_slices, xv)
     subtitle <- if (lumped)
-      paste0("Showing the ", PIE_MAX - 1, " largest categories; the rest are grouped as “Other”.")
+      paste0("Showing the ", pielim - 1, " largest categories; the rest are grouped as “Other”.")
     else NULL
 
     return(
@@ -265,35 +466,59 @@ build_full_plot <- function(df, p) {
         theme_void(base_size = 13) +
         theme(plot.title    = element_text(hjust = 0.5, face = "bold", size = 14),
               plot.subtitle = element_text(hjust = 0.5, size = 10, color = "#666"),
-              legend.position = "right", legend.title = element_text(size = 11))
+              legend.position = legend_pos, legend.title = element_text(size = 11))
     )
   }
 
   if (is.null(p_obj)) return(NULL)
 
-  if (!is.null(cv)) {
-    if (is.numeric(df[[cv]]) && dplyr::n_distinct(df[[cv]]) > 10) {
-      p_obj <- p_obj + scale_color_viridis_c() + scale_fill_viridis_c()
-    } else if (dplyr::n_distinct(df[[cv]]) > BREWER_MAX) {
-      p_obj <- p_obj + scale_color_viridis_d() + scale_fill_viridis_d()
-    } else {
-      p_obj <- p_obj + scale_color_brewer(palette = "Set1") +
-                       scale_fill_brewer(palette = "Set1")
-    }
+  # Group color palette (user-selectable, recycled so it never runs out).
+  if (!is.null(cv))
+    for (s in group_scales(df, cv, p$palette %||% "auto")) p_obj <- p_obj + s
+
+  # Fitted-equation / R² annotation for an overlaid scatter or line.
+  if (isTRUE(p$reg_overlay) && isTRUE(p$trend_label) &&
+      pt %in% c("scatter", "line") && !is.null(yv)) {
+    lab <- trend_label_text(df, xv, yv, p$reg_type %||% "lm", p$reg_deg %||% 2)
+    if (!is.null(lab))
+      p_obj <- p_obj + annotate("text", x = -Inf, y = Inf, label = lab,
+                                hjust = -0.05, vjust = 1.5, size = 4,
+                                color = "#333333", fontface = "italic")
   }
+
+  # Log scales — guarded so they only apply to continuous axes.
+  ls <- p$logscale %||% "none"
+  if (ls %in% c("x", "both") && is.numeric(df[[xv]]) &&
+      pt %in% c("scatter", "line", "histogram"))
+    p_obj <- p_obj + scale_x_log10()
+  if (ls %in% c("y", "both") &&
+      pt %in% c("scatter", "line", "bar", "histogram", "boxplot"))
+    p_obj <- p_obj + scale_y_log10()
+
+  # Small multiples — capped so a stray continuous column can't explode panels.
+  if (!is.null(facet_v) && dplyr::n_distinct(df[[facet_v]]) <= 30)
+    p_obj <- p_obj + facet_wrap(vars(.data[[facet_v]]))
+
+  # Horizontal orientation (best for bar / box with long category labels).
+  if (isTRUE(p$flip)) p_obj <- p_obj + coord_flip()
 
   uses_color <- pt %in% c("scatter", "line")
   base_theme <- theme_call(p$theme, 13) +
     theme(
       plot.title      = element_text(hjust = 0.5, face = "bold", size = 14,
                                      margin = margin(b = 10)),
+      plot.subtitle   = element_text(hjust = 0.5, size = 10, color = "#666"),
       axis.title      = element_text(size = 12),
       legend.title    = element_text(size = 11),
-      legend.position = "right"
+      legend.position = legend_pos
     )
+  if (!isTRUE(p$gridlines %||% TRUE))
+    base_theme <- base_theme + theme(panel.grid = element_blank())
+  if (needs_x_rotation(df, pt, xv) && !isTRUE(p$flip))
+    base_theme <- base_theme + theme(axis.text.x = element_text(angle = 40, hjust = 1))
 
   p_obj + base_theme + labs(
-    title = title, x = xlab, y = ylab,
+    title = title, subtitle = subtitle, x = xlab, y = ylab,
     color = if (uses_color) cv else NULL,
     fill  = if (!uses_color) cv else NULL
   )
@@ -318,6 +543,8 @@ generate_code <- function(df, p) {
   xv <- p$x
   yv <- if (!is.null(p$y) && nzchar(p$y) && p$y != "__count__") p$y else NULL
   cv <- if (!is.null(p$color) && nzchar(p$color) && p$color != "__none__") p$color else NULL
+  facet_v <- if (!is.null(p$facet) && nzchar(p$facet) &&
+                 p$facet != "__none__" && p$facet %in% names(df)) p$facet else NULL
 
   if (pt %in% c("scatter", "line", "boxplot") && is.null(yv))
     return("# Select a Y variable to generate code for this chart type.")
@@ -332,10 +559,20 @@ generate_code <- function(df, p) {
     cv <- NULL
   }
 
+  if (pt == "line")
+    pre <- c(pre, sprintf('df <- df[order(df[["%s"]]), ]  # lines connect points in row order', xv))
+  barmax <- p$cat_limit %||% BAR_MAX
+  if (pt == "bar" && is_discrete_col(df[[xv]]) && dplyr::n_distinct(df[[xv]]) > barmax)
+    pre <- c(pre, sprintf("# The app showed only the top %d categories of '%s'; this code plots them all.",
+                          barmax, xv),
+                  sprintf("# To match it, lump the rest: df[[\"%s\"]] <- forcats::fct_lump_n(df[[\"%s\"]], %d)",
+                          xv, xv, barmax))
+
   size  <- p$size %||% 2
   col   <- p$color_hex %||% UF_BLUE
   bins  <- p$bins %||% 30
   agg   <- p$bar_agg %||% "sum"
+  alpha <- round(p$alpha %||% 0.8, 2)
   theme_str <- switch(p$theme %||% "minimal",
     minimal = "theme_minimal()", classic = "theme_classic()",
     light   = "theme_light()",   bw      = "theme_bw()",
@@ -349,15 +586,12 @@ generate_code <- function(df, p) {
   needs_dplyr <- (pt == "bar" && !is.null(yv)) || pt == "pie"
 
   scale_line <- NULL
-  if (!is.null(cv)) {
-    if (is.numeric(df[[cv]]) && dplyr::n_distinct(df[[cv]]) > 10)
-      scale_line <- if (uses_color) "scale_color_viridis_c()" else "scale_fill_viridis_c()"
-    else if (dplyr::n_distinct(df[[cv]]) > BREWER_MAX)
-      scale_line <- if (uses_color) "scale_color_viridis_d()" else "scale_fill_viridis_d()"
-    else
-      scale_line <- if (uses_color) 'scale_color_brewer(palette = "Set1")'
-                    else            'scale_fill_brewer(palette = "Set1")'
-  }
+  if (!is.null(cv))
+    scale_line <- palette_code(
+      p$palette %||% "auto",
+      if (uses_color) "color" else "fill",
+      is.numeric(df[[cv]]) && dplyr::n_distinct(df[[cv]]) > 10,
+      dplyr::n_distinct(df[[cv]]))
 
   smooth_line <- NULL
   if (isTRUE(p$reg_overlay) && pt %in% c("scatter", "line")) {
@@ -386,16 +620,20 @@ generate_code <- function(df, p) {
                             bq(xv), bq(yv)))
     }
     pre <- c(pre, sprintf('plot_df[["%s"]] <- as.factor(plot_df[["%s"]])', xv, xv))
-    pie_fill <- if (dplyr::n_distinct(df[[xv]]) <= BREWER_MAX)
-                  'scale_fill_brewer(palette = "Set2")'
-                else
-                  'scale_fill_viridis_d()'
+    pal_pie <- p$palette %||% "auto"
+    nslice  <- dplyr::n_distinct(df[[xv]])
+    pie_fill <- if (pal_pie %in% c("auto", "")) {
+                  if (nslice <= BREWER_MAX) 'scale_fill_brewer(palette = "Set2")'
+                  else                       'scale_fill_viridis_d()'
+                } else palette_code(pal_pie, "fill", FALSE, nslice)
+    lp <- p$legend_pos %||% "right"
     code <- paste0(
       sprintf('ggplot(plot_df, aes(x = "", y = val, fill = %s)) +', bq(xv)),
       '\n  geom_col(width = 1, color = "white") +',
       '\n  coord_polar("y") +',
       '\n  ', pie_fill, ' +',
       '\n  theme_void()',
+      if (!identical(lp, "right")) sprintf(' +\n  theme(legend.position = "%s")', lp) else '',
       if (!is.null(title)) paste0(' +\n  labs(title = ', qq(title), ')') else ''
     )
     return(assemble_code(pre, code, needs_dplyr))
@@ -421,11 +659,12 @@ generate_code <- function(df, p) {
     ylab <- label_or(p$ylab %||% "", paste0(tools::toTitleCase(agg), " of ", yv))
   }
 
+  pt_fn <- if (isTRUE(p$jitter)) "geom_jitter" else "geom_point"
   geom_lines <- switch(pt,
     scatter = if (is.null(cv))
-                sprintf('geom_point(size = %s, alpha = 0.75, color = %s)', size, qq(col))
+                sprintf('%s(size = %s, alpha = %s, color = %s)', pt_fn, size, alpha, qq(col))
               else
-                sprintf('geom_point(size = %s, alpha = 0.75)', size),
+                sprintf('%s(size = %s, alpha = %s)', pt_fn, size, alpha),
     line    = if (is.null(cv))
                 sprintf('geom_line(linewidth = %s, color = %s) +\n  geom_point(size = %s, color = %s)',
                         size * 0.4, qq(col), size * 0.7, qq(col))
@@ -434,23 +673,23 @@ generate_code <- function(df, p) {
                         size * 0.4, size * 0.7),
     bar     = if (!is.null(yv)) {
                 if (is.null(cv))
-                  sprintf('geom_col(fill = %s, width = %s, alpha = 0.85)', qq(col), round(bar_width(size), 3))
+                  sprintf('geom_col(fill = %s, width = %s, alpha = %s)', qq(col), round(bar_width(size), 3), alpha)
                 else
-                  sprintf('geom_col(width = %s, alpha = 0.85, position = "dodge")', round(bar_width(size), 3))
+                  sprintf('geom_col(width = %s, alpha = %s, position = "dodge")', round(bar_width(size), 3), alpha)
               } else {
                 if (is.null(cv))
-                  sprintf('geom_bar(fill = %s, width = %s, alpha = 0.85)', qq(col), round(bar_width(size), 3))
+                  sprintf('geom_bar(fill = %s, width = %s, alpha = %s)', qq(col), round(bar_width(size), 3), alpha)
                 else
-                  sprintf('geom_bar(width = %s, alpha = 0.85, position = "dodge")', round(bar_width(size), 3))
+                  sprintf('geom_bar(width = %s, alpha = %s, position = "dodge")', round(bar_width(size), 3), alpha)
               },
     histogram = if (is.null(cv))
-                  sprintf('geom_histogram(bins = %s, color = "white", fill = %s, alpha = 0.85)', bins, qq(col))
+                  sprintf('geom_histogram(bins = %s, color = "white", fill = %s, alpha = %s)', bins, qq(col), alpha)
                 else
-                  sprintf('geom_histogram(bins = %s, color = "white", alpha = 0.75, position = "dodge")', bins),
+                  sprintf('geom_histogram(bins = %s, color = "white", alpha = %s, position = "dodge")', bins, alpha),
     boxplot = if (is.null(cv))
-                sprintf('geom_boxplot(fill = %s, alpha = 0.75)', qq(col))
+                sprintf('geom_boxplot(fill = %s, alpha = %s)', qq(col), alpha)
               else
-                'geom_boxplot(alpha = 0.75)'
+                sprintf('geom_boxplot(alpha = %s)', alpha)
   )
 
   if (pt %in% c("bar", "histogram") && is.null(yv)) ylab <- "Count"
@@ -465,7 +704,38 @@ generate_code <- function(df, p) {
   lines <- c(lines, geom_lines)
   if (!is.null(smooth_line)) lines <- c(lines, smooth_line)
   if (!is.null(scale_line))  lines <- c(lines, scale_line)
+
+  if (isTRUE(p$reg_overlay) && isTRUE(p$trend_label) &&
+      pt %in% c("scatter", "line") && !is.null(yv)) {
+    tl <- trend_label_text(df, xv, yv, p$reg_type %||% "lm", p$reg_deg %||% 2)
+    if (!is.null(tl))
+      lines <- c(lines, sprintf(
+        'annotate("text", x = -Inf, y = Inf, label = %s, hjust = -0.05, vjust = 1.5, size = 4, color = "#333333", fontface = "italic")',
+        qq(tl)))
+  }
+
+  ls <- p$logscale %||% "none"
+  if (ls %in% c("x", "both") && is.numeric(df[[xv]]) &&
+      pt %in% c("scatter", "line", "histogram"))
+    lines <- c(lines, "scale_x_log10()")
+  if (ls %in% c("y", "both") &&
+      pt %in% c("scatter", "line", "bar", "histogram", "boxplot"))
+    lines <- c(lines, "scale_y_log10()")
+
+  if (!is.null(facet_v)) lines <- c(lines, sprintf("facet_wrap(vars(%s))", bq(facet_v)))
+  if (isTRUE(p$flip))    lines <- c(lines, "coord_flip()")
+
   lines <- c(lines, theme_str)
+
+  theme_args <- character(0)
+  lp <- p$legend_pos %||% "right"
+  if (!identical(lp, "right"))            theme_args <- c(theme_args, sprintf('legend.position = "%s"', lp))
+  if (!isTRUE(p$gridlines %||% TRUE))     theme_args <- c(theme_args, "panel.grid = element_blank()")
+  if (needs_x_rotation(df, pt, xv) && !isTRUE(p$flip))
+    theme_args <- c(theme_args, "axis.text.x = element_text(angle = 40, hjust = 1)")
+  if (length(theme_args))
+    lines <- c(lines, sprintf("theme(%s)", paste(theme_args, collapse = ", ")))
+
   lines <- c(lines, sprintf("labs(%s)", paste(labs_parts, collapse = ", ")))
 
   code <- paste0(lines[1], " +\n  ",
@@ -542,6 +812,7 @@ plot_slot_panel <- function(i) {
     uiOutput(paste0("ui_mp", i, "_x")),
     uiOutput(paste0("ui_mp", i, "_y")),
     uiOutput(paste0("ui_mp", i, "_color")),
+    uiOutput(paste0("ui_mp", i, "_hint")),
     conditionalPanel(
       sprintf("input.mp%d_type == 'bar'", i),
       selectInput(paste0("mp", i, "_baragg"),
@@ -553,20 +824,31 @@ plot_slot_panel <- function(i) {
       sprintf("input.mp%d_type == 'histogram'", i),
       sliderInput(paste0("mp", i, "_bins"), "Bins", min = 5, max = 60, value = 30, step = 1)
     ),
+    # Max bars / slices (rendered for bar & pie, sized to the data).
+    uiOutput(paste0("ui_mp", i, "_catlimit")),
     tags$hr(),
     tags$h6("Labels"),
     textInput(paste0("mp", i, "_title"), "Title",        placeholder = "(optional)"),
-    textInput(paste0("mp", i, "_xlab"),  "X-Axis Label", placeholder = "auto"),
-    textInput(paste0("mp", i, "_ylab"),  "Y-Axis Label", placeholder = "auto"),
-    tags$hr(),
-    tags$h6("Style"),
-    selectInput(paste0("mp", i, "_theme"), "Theme",
-                choices = c("Minimal" = "minimal", "Classic" = "classic",
-                            "Light" = "light", "B&W" = "bw", "Dark" = "dark")),
-    colourInput(paste0("mp", i, "_color"), "Default Color",
-                value = MP_COLORS[((i - 1) %% length(MP_COLORS)) + 1]),
-    sliderInput(paste0("mp", i, "_size"), "Point / Bar Size",
-                min = 0.5, max = 5, value = 2, step = 0.5),
+    # Pie charts have no axes, so axis labels don't apply.
+    conditionalPanel(
+      sprintf("input.mp%d_type != 'pie'", i),
+      textInput(paste0("mp", i, "_xlab"),  "X-Axis Label", placeholder = "auto"),
+      textInput(paste0("mp", i, "_ylab"),  "Y-Axis Label", placeholder = "auto")
+    ),
+    # Theme / default color / size are meaningless for a pie (it uses a fixed
+    # legend-driven layout and the palette controls its colors), so hide them.
+    conditionalPanel(
+      sprintf("input.mp%d_type != 'pie'", i),
+      tags$hr(),
+      tags$h6("Style"),
+      selectInput(paste0("mp", i, "_theme"), "Theme",
+                  choices = c("Minimal" = "minimal", "Classic" = "classic",
+                              "Light" = "light", "B&W" = "bw", "Dark" = "dark")),
+      colourInput(paste0("mp", i, "_color"), "Default Color",
+                  value = MP_COLORS[((i - 1) %% length(MP_COLORS)) + 1]),
+      sliderInput(paste0("mp", i, "_size"), "Point / Bar Size",
+                  min = 0.5, max = 5, value = 2, step = 0.5)
+    ),
     conditionalPanel(
       sprintf("input.mp%d_type == 'scatter' || input.mp%d_type == 'line'", i, i),
       tags$hr(),
@@ -582,7 +864,59 @@ plot_slot_panel <- function(i) {
                       min = 2, max = 6, value = 2)
         ),
         checkboxInput(paste0("mp", i, "_regci"), "Show 95% CI Band", TRUE),
-        colourInput(paste0("mp", i, "_regcol"), "Line Color", value = UF_ORANGE)
+        colourInput(paste0("mp", i, "_regcol"), "Line Color", value = UF_ORANGE),
+        checkboxInput(paste0("mp", i, "_trendlab"),
+                      tags$span("Show equation & R² on plot",
+                                info_icon("Annotates the chart with the fitted equation (or model type) and its R².")),
+                      FALSE)
+      )
+    ),
+    # Less-common appearance settings live in a collapsed panel so the main
+    # controls stay uncluttered.
+    accordion(
+      open = FALSE,
+      accordion_panel(
+        icon("sliders"), " Advanced options",
+        value = paste0("adv", i),
+        selectInput(paste0("mp", i, "_palette"),
+                    tags$span("Color Palette",
+                              info_icon("Colors for grouped charts and for the slices of a pie chart. “Automatic” keeps the built-in choice; “Colorblind-safe” uses the Okabe–Ito palette.")),
+                    choices = PALETTES),
+        # Opacity / log scale / gridlines don't apply to a pie chart.
+        conditionalPanel(
+          sprintf("input.mp%d_type != 'pie'", i),
+          sliderInput(paste0("mp", i, "_alpha"), "Opacity",
+                      min = 0.1, max = 1, value = 0.8, step = 0.05)
+        ),
+        conditionalPanel(
+          sprintf("input.mp%d_type == 'scatter'", i),
+          checkboxInput(paste0("mp", i, "_jitter"),
+                        tags$span("Jitter points",
+                                  info_icon("Nudges overlapping points apart so dense scatters stay readable.")),
+                        FALSE)
+        ),
+        conditionalPanel(
+          sprintf("input.mp%d_type != 'pie'", i),
+          selectInput(paste0("mp", i, "_logscale"),
+                      tags$span("Log Scale",
+                                info_icon("Log10-transforms an axis — useful for skewed or wide-ranging values. Applied only to continuous axes.")),
+                      choices = c("None" = "none", "X axis" = "x", "Y axis" = "y", "Both" = "both"))
+        ),
+        uiOutput(paste0("ui_mp", i, "_facet")),
+        selectInput(paste0("mp", i, "_legendpos"), "Legend Position",
+                    choices = c("Right" = "right", "Bottom" = "bottom",
+                                "Top" = "top", "Hidden" = "none")),
+        conditionalPanel(
+          sprintf("input.mp%d_type == 'bar' || input.mp%d_type == 'boxplot'", i, i),
+          checkboxInput(paste0("mp", i, "_flip"),
+                        tags$span("Horizontal orientation",
+                                  info_icon("Flips the chart on its side — handy when category labels are long or numerous.")),
+                        FALSE)
+        ),
+        conditionalPanel(
+          sprintf("input.mp%d_type != 'pie'", i),
+          checkboxInput(paste0("mp", i, "_grid"), "Show gridlines", TRUE)
+        )
       )
     )
   )
@@ -640,7 +974,10 @@ ui <- page_navbar(
                     choices = c("Period (.)" = ".", "Comma (,)" = ",")),
         hr(),
         actionButton("load_example", "Load mtcars Example",
-                     class = "btn-outline-primary w-100", icon = icon("table"))
+                     class = "btn-outline-primary w-100", icon = icon("table")),
+        br(), br(),
+        actionButton("clear_data", "Clear Data",
+                     class = "btn-outline-danger w-100", icon = icon("trash"))
       ),
       layout_columns(
         card(
@@ -674,6 +1011,10 @@ ui <- page_navbar(
           tags$div(class = "form-text mb-2",
                    "Copies Plot 1's theme, color, and size to the other plots.")
         ),
+        actionButton("reset_plots", "Reset settings to default",
+                     icon = icon("rotate-left"), class = "btn-outline-secondary btn-sm w-100"),
+        tags$div(class = "form-text mb-2",
+                 "Clears every plot's settings. Changing the number of plots no longer resets them."),
         hr(),
         uiOutput("plot_config_accordion")
       ),
@@ -795,6 +1136,20 @@ ui <- page_navbar(
           DTOutput("exp_data_tbl")
         )
       )
+    ),
+    card(
+      card_header(icon("square-root-variable"), " Export Regression"),
+      layout_sidebar(
+        sidebar = sidebar(
+          width = 260,
+          tags$p(class = "text-muted small",
+                 "Exports the model fitted on the Regression tab."),
+          downloadButton("dl_exp_reg_txt", "Summary (.txt)",      class = "btn-success w-100"),
+          br(), br(),
+          downloadButton("dl_exp_reg_csv", "Coefficients (.csv)", class = "btn-info w-100")
+        ),
+        verbatimTextOutput("reg_export_preview")
+      )
     )
   ),
 
@@ -875,6 +1230,30 @@ ui <- page_navbar(
             tags$dt("Bar Aggregation"),
             tags$dd("When a bar chart has a Y variable, repeated categories are combined with this function. 'Sum' totals the values, 'Mean' averages them, 'Median' takes the middle value. With no Y variable, bars simply count rows per category."),
             tags$hr(),
+            tags$dt("Maximum bars / slices"),
+            tags$dd("Bar and pie charts keep this many of the largest categories and group the rest into a single 'Other' bar/slice, so a column with many categories stays readable. Defaults to a sensible cap; slide it up to show more categories (up to the number in your data) or down to simplify."),
+            tags$hr(),
+            tags$dt("Group Color Palette"),
+            tags$dd("The set of colors used when a Color / Group By variable is set. 'Automatic' chooses for you; 'Colorblind-safe' (Okabe–Ito) is the safest for accessibility; 'UF Brand', 'Viridis', 'ColorBrewer', and 'Greyscale' are alternatives. Palettes are recycled so they never run out of colors."),
+            tags$hr(),
+            tags$dt("Opacity"),
+            tags$dd("How see-through the points, bars, or boxes are (0.1 = nearly transparent, 1 = solid). Lowering it helps when many points or bars overlap."),
+            tags$hr(),
+            tags$dt("Jitter points"),
+            tags$dd("Adds a small random nudge to each scatter point so that points sharing the same value don't sit exactly on top of one another. Useful for dense or rounded data; it changes only the display, not the underlying values."),
+            tags$hr(),
+            tags$dt("Log Scale"),
+            tags$dd("Plots an axis on a base-10 logarithmic scale, so each step is ×10 (1, 10, 100, …). Helpful when values span several orders of magnitude or are heavily right-skewed. Only applies to continuous (numeric) axes and to positive values."),
+            tags$hr(),
+            tags$dt("Facet By (small multiples)"),
+            tags$dd("Splits one chart into a grid of small panels — one per category of the chosen variable — so you can compare groups side by side (e.g. one scatter per region). All panels share the same axes for easy comparison."),
+            tags$hr(),
+            tags$dt("Horizontal orientation"),
+            tags$dd("Flips a bar or box plot onto its side. This is the easiest fix when category labels are long or there are many of them and they overlap along the bottom."),
+            tags$hr(),
+            tags$dt("Show equation & R² (trendline label)"),
+            tags$dd("When a fitted line is overlaid on a scatter or line chart, this prints the fitted equation (or the model type) and its R² directly on the plot. R² ranges 0–1 and is the share of variation the fit explains."),
+            tags$hr(),
             tags$dt("Resolution (DPI)"),
             tags$dd("Dots per inch — controls the sharpness of exported images. 72–96 DPI is screen quality. 150 DPI is good for presentations. 300+ DPI is recommended for print or publication. Higher DPI means a larger file size.")
           )
@@ -890,7 +1269,8 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
 
-  rv <- reactiveValues(data = NULL, model = NULL)
+  # `reset` is bumped to force the plot-config UI to rebuild at its defaults.
+  rv <- reactiveValues(data = NULL, model = NULL, reset = 0L)
 
   # ── Load data ─────────────────────────────────────────────
 
@@ -915,6 +1295,12 @@ server <- function(input, output, session) {
       showNotification(paste("Read error:", e$message), type = "error", duration = 8))
   })
 
+  observeEvent(input$clear_data, {
+    rv$data  <- NULL
+    rv$model <- NULL
+    showNotification("Cleared the loaded data.", type = "message")
+  })
+
   # ── Data preview ──────────────────────────────────────────
 
   output$tbl_preview <- renderDT({
@@ -935,27 +1321,48 @@ server <- function(input, output, session) {
     req(rv$data)
     names(rv$data)[vapply(rv$data, is.numeric, logical(1))]
   })
-
-  # ── Visualize: configuration accordion (1–4 plots) ────────
-
-  output$plot_config_accordion <- renderUI({
-    n <- as.integer(input$n_plots %||% 1)
-    panels <- lapply(seq_len(n), plot_slot_panel)
-    do.call(accordion, c(list(open = "panel1"), panels))
+  # Categorical-ish columns (good for faceting): discrete, or low-cardinality
+  # numeric like cyl. Capped so faceting can't be offered on an ID column.
+  cols_cat <- reactive({
+    req(rv$data)
+    names(rv$data)[vapply(rv$data, function(x)
+      (is_discrete_col(x) || (is.numeric(x) && dplyr::n_distinct(x) <= 10)) &&
+        dplyr::n_distinct(x) <= 30, logical(1))]
   })
 
-  # Per-slot, data-aware selectors
+  # ── Visualize: configuration accordion (1–4 plots) ────────
+  #
+  # Built once (and again only when the user hits Reset) — crucially it does
+  # NOT depend on input$n_plots, so changing the plot count just shows/hides
+  # panels client-side instead of rebuilding (and resetting) every control.
+  output$plot_config_accordion <- renderUI({
+    rv$reset
+    tagList(
+      accordion(plot_slot_panel(1), open = "panel1"),
+      conditionalPanel("input.n_plots >= 2", accordion(plot_slot_panel(2), open = FALSE)),
+      conditionalPanel("input.n_plots >= 3", accordion(plot_slot_panel(3), open = FALSE)),
+      conditionalPanel("input.n_plots >= 4", accordion(plot_slot_panel(4), open = FALSE))
+    )
+  })
+
+  # Per-slot, data-aware selectors. They read rv$reset so the Reset button
+  # also clears the variable picks back to their defaults.
   for (i in 1:4) {
     local({
       idx <- i
       output[[paste0("ui_mp", idx, "_x")]] <- renderUI({
-        req(rv$data)
-        ty  <- input[[paste0("mp", idx, "_type")]]
-        lbl <- if (!is.null(ty) && ty == "pie") "Category (one slice per value)" else "X Variable"
+        req(rv$data); rv$reset
+        ty <- input[[paste0("mp", idx, "_type")]] %||% "scatter"
+        # Histograms can only bin a numeric column, so restrict the choices
+        # rather than letting a text column produce a broken/empty plot.
+        if (identical(ty, "histogram"))
+          return(selectInput(paste0("mp", idx, "_xvar"), "X Variable (numeric)",
+                             choices = cols_num()))
+        lbl <- if (identical(ty, "pie")) "Category (one slice per value)" else "X Variable"
         selectInput(paste0("mp", idx, "_xvar"), lbl, choices = cols_all())
       })
       output[[paste0("ui_mp", idx, "_y")]] <- renderUI({
-        req(rv$data)
+        req(rv$data); rv$reset
         ty <- input[[paste0("mp", idx, "_type")]]
         req(ty)
         if (ty == "histogram")
@@ -968,12 +1375,47 @@ server <- function(input, output, session) {
         selectInput(paste0("mp", idx, "_yvar"), "Y Variable", choices = cols_num())
       })
       output[[paste0("ui_mp", idx, "_color")]] <- renderUI({
-        req(rv$data)
+        req(rv$data); rv$reset
         ty <- input[[paste0("mp", idx, "_type")]]
         req(ty)
         if (ty == "pie") return(NULL)
         selectInput(paste0("mp", idx, "_colorvar"), "Color / Group By (optional)",
                     choices = c("None" = "__none__", cols_all()))
+      })
+      output[[paste0("ui_mp", idx, "_hint")]] <- renderUI({
+        req(rv$data, input[[paste0("mp", idx, "_type")]])
+        msg <- chart_hint(rv$data, slot_params(idx))
+        if (is.null(msg)) return(NULL)
+        div(class = "alert alert-warning py-1 px-2 small mb-2", role = "alert",
+            icon("triangle-exclamation"), HTML(paste0(" ", msg)))
+      })
+      output[[paste0("ui_mp", idx, "_facet")]] <- renderUI({
+        req(rv$data); rv$reset
+        ty <- input[[paste0("mp", idx, "_type")]]
+        if (identical(ty, "pie")) return(NULL)
+        selectInput(paste0("mp", idx, "_facetvar"),
+                    tags$span("Facet By (small multiples)",
+                              info_icon("Splits the chart into one panel per category of this variable. Only categorical / low-cardinality columns are offered.")),
+                    choices = c("None" = "__none__", cols_cat()))
+      })
+      # Max-categories slider for bar (bars) and pie (slices). Data-aware: it
+      # ranges up to the number of distinct categories so the user can show
+      # all of them, and defaults to a readable cap. Categories beyond the cap
+      # are grouped into a single "Other".
+      output[[paste0("ui_mp", idx, "_catlimit")]] <- renderUI({
+        req(rv$data); rv$reset
+        ty <- input[[paste0("mp", idx, "_type")]]
+        if (!isTRUE(ty %in% c("bar", "pie"))) return(NULL)
+        xv <- input[[paste0("mp", idx, "_xvar")]]
+        req(xv, xv %in% names(rv$data))
+        nx <- dplyr::n_distinct(rv$data[[xv]])
+        if (nx <= 2) return(NULL)
+        unit <- if (ty == "bar") "bars" else "slices"
+        deflt <- min(if (ty == "bar") BAR_MAX else PIE_MAX, nx)
+        sliderInput(paste0("mp", idx, "_catlimitv"),
+          tags$span(sprintf("Maximum %s", unit),
+            info_icon(sprintf("Keeps the largest categories and groups the rest into a single “Other” slice/bar. Defaults to %d for readability — slide up to show more (max %d), or down to simplify.", deflt, nx))),
+          min = 2, max = nx, value = deflt, step = 1)
       })
     })
   }
@@ -993,11 +1435,21 @@ server <- function(input, output, session) {
       size        = input[[paste0("mp", i, "_size")]],
       bins        = input[[paste0("mp", i, "_bins")]],
       bar_agg     = input[[paste0("mp", i, "_baragg")]],
+      cat_limit   = input[[paste0("mp", i, "_catlimitv")]],
       reg_overlay = isTRUE(input[[paste0("mp", i, "_reg")]]),
       reg_type    = input[[paste0("mp", i, "_regtype")]],
       reg_deg     = input[[paste0("mp", i, "_regdeg")]],
       reg_ci      = isTRUE(input[[paste0("mp", i, "_regci")]]),
-      reg_col     = input[[paste0("mp", i, "_regcol")]]
+      reg_col     = input[[paste0("mp", i, "_regcol")]],
+      trend_label = isTRUE(input[[paste0("mp", i, "_trendlab")]]),
+      palette     = input[[paste0("mp", i, "_palette")]]  %||% "auto",
+      alpha       = input[[paste0("mp", i, "_alpha")]],
+      jitter      = isTRUE(input[[paste0("mp", i, "_jitter")]]),
+      logscale    = input[[paste0("mp", i, "_logscale")]] %||% "none",
+      facet       = input[[paste0("mp", i, "_facetvar")]],
+      legend_pos  = input[[paste0("mp", i, "_legendpos")]] %||% "right",
+      gridlines   = input[[paste0("mp", i, "_grid")]] %||% TRUE,
+      flip        = isTRUE(input[[paste0("mp", i, "_flip")]])
     )
   }
 
@@ -1022,12 +1474,27 @@ server <- function(input, output, session) {
     th <- input$mp1_theme
     co <- input$mp1_color
     sz <- input$mp1_size
+    pal <- input$mp1_palette
+    al  <- input$mp1_alpha
+    lp  <- input$mp1_legendpos
+    gr  <- input$mp1_grid
     for (i in 2:n) {
       if (!is.null(th)) updateSelectInput(session, paste0("mp", i, "_theme"), selected = th)
       if (!is.null(co)) colourpicker::updateColourInput(session, paste0("mp", i, "_color"), value = co)
       if (!is.null(sz)) updateSliderInput(session, paste0("mp", i, "_size"), value = sz)
+      if (!is.null(pal)) updateSelectInput(session, paste0("mp", i, "_palette"), selected = pal)
+      if (!is.null(al))  updateSliderInput(session, paste0("mp", i, "_alpha"), value = al)
+      if (!is.null(lp))  updateSelectInput(session, paste0("mp", i, "_legendpos"), selected = lp)
+      if (!is.null(gr))  updateCheckboxInput(session, paste0("mp", i, "_grid"), value = gr)
     }
     showNotification("Applied Plot 1's style to the other plots.", type = "message")
+  })
+
+  # Reset every plot's settings to default by rebuilding the config UI.
+  observeEvent(input$reset_plots, {
+    rv$reset <- rv$reset + 1L
+    updateRadioButtons(session, "n_plots", selected = 1)
+    showNotification("Reset all plot settings to default.", type = "message")
   })
 
   # ── Visualize: plot area + per-plot R code ────────────────
@@ -1141,9 +1608,13 @@ server <- function(input, output, session) {
       showNotification(paste("Fitting error:", e$message), type = "error", duration = 8))
   })
 
+  # summary() is the expensive call on a big model, so compute it once and
+  # share it between the printout and the plain-English interpretation.
+  model_summary <- reactive({ req(rv$model); summary(rv$model) })
+
   output$reg_summary <- renderPrint({
     if (is.null(rv$model)) cat("Fit a model using the panel on the left.\n")
-    else                   summary(rv$model)
+    else                   model_summary()
   })
 
   output$reg_interpretation <- renderUI({
@@ -1151,7 +1622,7 @@ server <- function(input, output, session) {
       return(tags$p(class = "text-muted fst-italic",
                     "Fit a model to see an interpretation of the results."))
 
-    s      <- summary(rv$model)
+    s      <- model_summary()
     r2     <- round(s$r.squared, 3)
     adj_r2 <- round(s$adj.r.squared, 3)
     fstat  <- s$fstatistic
@@ -1185,27 +1656,44 @@ server <- function(input, output, session) {
     )
   })
 
+  # Diagnostic-plot data is thinned to BIG_ROWS points (deterministically, so
+  # the view doesn't jump on re-render) to keep ggplotly snappy on large
+  # datasets. The model is still fit on every row.
+  thin_rows <- function(d) {
+    if (nrow(d) <= BIG_ROWS) return(d)
+    d[unique(round(seq(1, nrow(d), length.out = BIG_ROWS))), , drop = FALSE]
+  }
+  thin_note <- function(n)
+    if (n > BIG_ROWS)
+      sprintf("Showing ~%s of %s points for responsiveness",
+              format(BIG_ROWS, big.mark = ","), format(n, big.mark = ","))
+    else NULL
+
   output$reg_plot_fitted <- renderPlotly({
     req(rv$model)
     d <- data.frame(actual = rv$model$model[[1]], fitted = fitted(rv$model))
+    note <- thin_note(nrow(d)); d <- thin_rows(d)
     p <- ggplot(d, aes(x = actual, y = fitted)) +
          geom_point(color = UF_BLUE, size = 2.5, alpha = 0.7) +
          geom_abline(color = UF_ORANGE, linetype = "dashed", linewidth = 1) +
          theme_minimal(base_size = 12) +
-         labs(title = "Fitted vs Actual", x = "Actual", y = "Fitted") +
-         theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+         labs(title = "Fitted vs Actual", subtitle = note, x = "Actual", y = "Fitted") +
+         theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+               plot.subtitle = element_text(hjust = 0.5, size = 9, color = "#777"))
     ggplotly(p) |> layout(margin = list(t = 90, b = 40, l = 55, r = 20))
   })
 
   output$reg_plot_resid <- renderPlotly({
     req(rv$model)
     d <- data.frame(fitted = fitted(rv$model), resid = residuals(rv$model))
+    note <- thin_note(nrow(d)); d <- thin_rows(d)
     p <- ggplot(d, aes(x = fitted, y = resid)) +
          geom_point(color = UF_BLUE, size = 2.5, alpha = 0.7) +
          geom_hline(yintercept = 0, color = UF_ORANGE, linetype = "dashed", linewidth = 1) +
          theme_minimal(base_size = 12) +
-         labs(title = "Residuals vs Fitted", x = "Fitted Values", y = "Residuals") +
-         theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+         labs(title = "Residuals vs Fitted", subtitle = note, x = "Fitted Values", y = "Residuals") +
+         theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+               plot.subtitle = element_text(hjust = 0.5, size = 9, color = "#777"))
     ggplotly(p) |> layout(margin = list(t = 90, b = 40, l = 55, r = 20))
   })
 
@@ -1287,6 +1775,28 @@ server <- function(input, output, session) {
   output$dl_xlsx <- downloadHandler(
     filename = function() paste0("data_", Sys.Date(), ".xlsx"),
     content  = function(f) { req(rv$data); write_xlsx(export_df(), f) }
+  )
+
+  # ── Export: regression results ────────────────────────────
+
+  output$reg_export_preview <- renderPrint({
+    if (is.null(rv$model)) cat("Fit a model on the Regression tab to enable export.\n")
+    else                   model_summary()
+  })
+
+  output$dl_exp_reg_txt <- downloadHandler(
+    filename = function() paste0("model_summary_", Sys.Date(), ".txt"),
+    content  = function(f) { req(rv$model); capture.output(model_summary(), file = f) }
+  )
+
+  output$dl_exp_reg_csv <- downloadHandler(
+    filename = function() paste0("model_coefficients_", Sys.Date(), ".csv"),
+    content  = function(f) {
+      req(rv$model)
+      co <- as.data.frame(model_summary()$coefficients)
+      co <- cbind(Term = rownames(co), co)
+      write.csv(co, f, row.names = FALSE)
+    }
   )
 }
 
