@@ -88,6 +88,183 @@ theme_call <- function(name, base_size = 13) {
 }
 
 # ----------------------------------------------------------
+# Data Health — diagnose common spreadsheet problems and offer
+# opt-in, reversible fixes. Detection and the fix transform live
+# together in clean_specs() so they can't drift apart.
+# ----------------------------------------------------------
+
+# Strings treated as "missing" placeholders. "-"/"." are deliberately excluded
+# so legitimate category values aren't clobbered.
+NA_TOKENS <- c("", "NA", "N/A", "n/a", "NULL", "null", "#N/A", "#n/a")
+
+# Parse a character vector as numbers after stripping $, commas, %, spaces.
+num_from_text <- function(x) suppressWarnings(as.numeric(gsub("[,$%[:space:]]", "", x)))
+
+# Fraction of values that parse cleanly as numbers, ignoring blanks and NA
+# placeholders (so a stray "N/A" doesn't hide an otherwise-numeric column).
+numeric_frac <- function(x) {
+  v <- x[!is.na(x) & !(trimws(x) %in% NA_TOKENS)]
+  if (!length(v)) return(0)
+  mean(!is.na(num_from_text(v)))
+}
+
+# Returns a Date vector if >= 90% of real (non-blank, non-placeholder) values
+# match an unambiguous ISO format, else NULL (we avoid guessing m/d vs d/m).
+dates_from_text <- function(x) {
+  keep <- !is.na(x) & !(trimws(x) %in% NA_TOKENS)
+  if (!any(keep)) return(NULL)
+  for (fmt in c("%Y-%m-%d", "%Y/%m/%d")) {
+    d <- suppressWarnings(as.Date(x, format = fmt))
+    if (mean(!is.na(d[keep])) >= 0.9) return(d)
+  }
+  NULL
+}
+
+# Logical "is this cell blank" (NA, or empty/whitespace-only string).
+blank_cell <- function(v) is.na(v) | (is.character(v) & trimws(v) == "")
+
+# Each spec: default (pre-checked?), detect(df) -> HTML string or NULL,
+# apply(df) -> df. Order here is the order fixes are applied.
+clean_specs <- function() list(
+  names = list(
+    default = TRUE,
+    detect = function(df) {
+      nm  <- names(df)
+      bad <- sum(is.na(nm) | trimws(nm) == "" | duplicated(nm))
+      if (bad == 0) return(NULL)
+      sprintf("<b>Column names:</b> make %d blank or duplicated name(s) unique.", bad)
+    },
+    apply = function(df) {
+      nm <- trimws(names(df)); nm[is.na(nm) | nm == ""] <- "V"
+      names(df) <- make.unique(nm, sep = "_"); df
+    }
+  ),
+  trim = list(
+    default = TRUE,
+    detect = function(df) {
+      ch    <- vapply(df, is.character, logical(1))
+      cells <- if (any(ch)) sum(vapply(df[ch], function(v)
+                 sum(!is.na(v) & v != trimws(v)), integer(1))) else 0L
+      nmws  <- sum(names(df) != trimws(names(df)))
+      if (cells == 0 && nmws == 0) return(NULL)
+      sprintf("<b>Whitespace:</b> trim leading/trailing spaces from %d value(s)%s.",
+              cells, if (nmws) sprintf(" and %d header(s)", nmws) else "")
+    },
+    apply = function(df) {
+      names(df) <- trimws(names(df))
+      for (c in names(df)) if (is.character(df[[c]])) df[[c]] <- trimws(df[[c]])
+      df
+    }
+  ),
+  na_tokens = list(
+    default = TRUE,
+    detect = function(df) {
+      ch    <- vapply(df, is.character, logical(1))
+      cells <- if (any(ch)) sum(vapply(df[ch], function(v)
+                 sum(!is.na(v) & v %in% NA_TOKENS), integer(1))) else 0L
+      if (cells == 0) return(NULL)
+      sprintf("<b>Missing-value markers:</b> convert %d placeholder cell(s) (e.g. \"N/A\", blank) to true missing (NA).", cells)
+    },
+    apply = function(df) {
+      for (c in names(df)) if (is.character(df[[c]])) {
+        v <- df[[c]]; v[v %in% NA_TOKENS] <- NA; df[[c]] <- v
+      }
+      df
+    }
+  ),
+  numeric = list(
+    default = TRUE,
+    detect = function(df) {
+      cols <- names(df)[vapply(df, function(v)
+        is.character(v) && numeric_frac(v) >= 0.9 && any(!is.na(num_from_text(v))),
+        logical(1))]
+      if (!length(cols)) return(NULL)
+      sprintf("<b>Numbers stored as text:</b> convert %s to numeric (strips $, commas, %%).",
+              paste(sprintf("<code>%s</code>", cols), collapse = ", "))
+    },
+    apply = function(df) {
+      for (c in names(df)) if (is.character(df[[c]]) && numeric_frac(df[[c]]) >= 0.9 &&
+                               any(!is.na(num_from_text(df[[c]]))))
+        df[[c]] <- num_from_text(df[[c]])
+      df
+    }
+  ),
+  dates = list(
+    default = FALSE,
+    detect = function(df) {
+      cols <- names(df)[vapply(df, function(v)
+        is.character(v) && !is.null(dates_from_text(v)), logical(1))]
+      if (!length(cols)) return(NULL)
+      sprintf("<b>Dates stored as text:</b> convert %s to Date (ISO yyyy-mm-dd).",
+              paste(sprintf("<code>%s</code>", cols), collapse = ", "))
+    },
+    apply = function(df) {
+      for (c in names(df)) if (is.character(df[[c]])) {
+        d <- dates_from_text(df[[c]]); if (!is.null(d)) df[[c]] <- d
+      }
+      df
+    }
+  ),
+  empty_cols = list(
+    default = TRUE,
+    detect = function(df) {
+      if (!nrow(df)) return(NULL)
+      n <- sum(vapply(df, function(v) all(blank_cell(v)), logical(1)))
+      if (n == 0) return(NULL)
+      sprintf("<b>Empty columns:</b> drop %d column(s) that are entirely blank.", n)
+    },
+    apply = function(df) {
+      if (!nrow(df)) return(df)
+      df[, !vapply(df, function(v) all(blank_cell(v)), logical(1)), drop = FALSE]
+    }
+  ),
+  empty_rows = list(
+    default = TRUE,
+    detect = function(df) {
+      if (!nrow(df) || !ncol(df)) return(NULL)
+      m <- sapply(df, blank_cell)
+      if (is.null(dim(m))) m <- matrix(m, nrow = nrow(df))
+      n <- sum(rowSums(m) == ncol(df))
+      if (n == 0) return(NULL)
+      sprintf("<b>Empty rows:</b> drop %d row(s) that are entirely blank.", n)
+    },
+    apply = function(df) {
+      if (!nrow(df) || !ncol(df)) return(df)
+      m <- sapply(df, blank_cell)
+      if (is.null(dim(m))) m <- matrix(m, nrow = nrow(df))
+      df[rowSums(m) != ncol(df), , drop = FALSE]
+    }
+  ),
+  dups = list(
+    default = TRUE,
+    detect = function(df) {
+      n <- sum(duplicated(df))
+      if (n == 0) return(NULL)
+      sprintf("<b>Duplicate rows:</b> remove %d exact duplicate row(s).", n)
+    },
+    apply = function(df) df[!duplicated(df), , drop = FALSE]
+  )
+)
+
+# Issues present in df, in spec order: list of list(id, desc, default).
+detect_issues <- function(df) {
+  specs <- clean_specs()
+  out   <- list()
+  for (id in names(specs)) {
+    d <- specs[[id]]$detect(df)
+    if (!is.null(d)) out[[id]] <- list(id = id, desc = d, default = specs[[id]]$default)
+  }
+  out
+}
+
+# Apply the selected fix ids (always in canonical spec order).
+clean_apply <- function(df, ids) {
+  specs <- clean_specs()
+  for (id in names(specs)) if (id %in% ids) df <- specs[[id]]$apply(df)
+  df
+}
+
+# ----------------------------------------------------------
 # Chart-suitability helpers — keep questionable variable/chart
 # pairings from producing the "strange-looking" plots that come
 # from feeding the wrong data type into a chart.
@@ -989,6 +1166,10 @@ ui <- page_navbar(
           verbatimTextOutput("tbl_summary")
         ),
         col_widths = c(8, 4)
+      ),
+      card(
+        card_header(icon("broom"), " Data Health"),
+        uiOutput("data_health_ui")
       )
     )
   ),
@@ -1270,7 +1451,8 @@ ui <- page_navbar(
 server <- function(input, output, session) {
 
   # `reset` is bumped to force the plot-config UI to rebuild at its defaults.
-  rv <- reactiveValues(data = NULL, model = NULL, reset = 0L)
+  # `data_raw` keeps the file exactly as uploaded so Data Health can revert.
+  rv <- reactiveValues(data = NULL, data_raw = NULL, model = NULL, reset = 0L)
 
   # ── Load data ─────────────────────────────────────────────
 
@@ -1278,7 +1460,7 @@ server <- function(input, output, session) {
     d <- as.data.frame(mtcars)
     d$car <- rownames(d)
     rownames(d) <- NULL
-    rv$data <- d
+    rv$data <- d; rv$data_raw <- d
     showNotification("Loaded example dataset: mtcars (Motor Trend Cars)", type = "message")
   })
 
@@ -1286,10 +1468,11 @@ server <- function(input, output, session) {
     req(input$file)
     ext <- tools::file_ext(input$file$name)
     tryCatch({
-      rv$data <- read_file_data(
+      d <- read_file_data(
         input$file$datapath, ext,
         header = input$header, sep = input$sep, dec = input$dec
       )
+      rv$data <- d; rv$data_raw <- d
       showNotification(paste("Loaded:", input$file$name), type = "message")
     }, error = function(e)
       showNotification(paste("Read error:", e$message), type = "error", duration = 8))
@@ -1297,8 +1480,58 @@ server <- function(input, output, session) {
 
   observeEvent(input$clear_data, {
     rv$data  <- NULL
+    rv$data_raw <- NULL
     rv$model <- NULL
     showNotification("Cleared the loaded data.", type = "message")
+  })
+
+  # ── Data Health: diagnose + opt-in, reversible fixes ──────
+
+  output$data_health_ui <- renderUI({
+    if (is.null(rv$data))
+      return(helpText("Load a dataset to run a quick health check."))
+    iss <- detect_issues(rv$data)
+    if (!length(iss))
+      return(div(class = "alert alert-success py-2 px-3 mb-0",
+                 icon("circle-check"),
+                 " No common data issues detected — your data is ready to explore."))
+    # choiceNames/Values must be unnamed (detect_issues returns a named list).
+    ids  <- unname(vapply(iss, `[[`, character(1), "id"))
+    defs <- unname(vapply(iss, `[[`, logical(1), "default"))
+    nms  <- unname(lapply(iss, function(z) HTML(z$desc)))
+    tagList(
+      tags$p(sprintf("Spotted %d potential issue%s. Tick the fixes you want, then Apply — everything is reversible:",
+                     length(iss), if (length(iss) == 1) "" else "s")),
+      checkboxGroupInput(
+        "dh_fixes", NULL,
+        choiceNames  = nms,
+        choiceValues = ids,
+        selected     = ids[defs]),
+      div(class = "d-flex gap-2",
+          actionButton("dh_apply", "Apply selected fixes",
+                       class = "btn-primary btn-sm", icon = icon("broom")),
+          actionButton("dh_revert", "Revert to original",
+                       class = "btn-outline-secondary btn-sm", icon = icon("rotate-left"))),
+      tags$div(class = "form-text mt-2",
+               "Fixes apply to a working copy used by the rest of the app; Revert restores the file exactly as uploaded.")
+    )
+  })
+
+  observeEvent(input$dh_apply, {
+    req(rv$data)
+    ids <- input$dh_fixes
+    if (is.null(ids) || !length(ids)) {
+      showNotification("No fixes selected.", type = "warning"); return()
+    }
+    rv$data <- clean_apply(rv$data, ids)
+    showNotification(sprintf("Applied %d fix%s.", length(ids),
+                             if (length(ids) == 1) "" else "es"), type = "message")
+  })
+
+  observeEvent(input$dh_revert, {
+    req(rv$data_raw)
+    rv$data <- rv$data_raw
+    showNotification("Reverted to the originally uploaded data.", type = "message")
   })
 
   # ── Data preview ──────────────────────────────────────────

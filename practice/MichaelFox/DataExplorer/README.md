@@ -11,6 +11,18 @@ This app allows users to upload their own data (or use the built-in `mtcars` dem
 ### Import Data
 Upload a CSV, TSV, plain-text, Excel (`.xlsx` / `.xls`), or `.rds` file, or load the built-in `mtcars` demo. Text files support comma, semicolon, tab, and space delimiters and either decimal point convention. The raw data table and a per-column summary are displayed on load. A **Clear Data** button removes the loaded dataset (and any fitted model) so you can start over.
 
+**Data Health** — a guided cleaning panel diagnoses common spreadsheet problems and offers **opt-in, reversible** fixes (it never changes your data silently):
+
+- **Column names** — make blank/duplicate names unique
+- **Whitespace** — trim stray spaces from values and headers
+- **Missing-value markers** — convert placeholders like `N/A`, `NULL`, or blanks to true `NA`
+- **Numbers stored as text** — convert columns like `"$1,200"` / `"12%"` to numeric (so they become usable in plots and regression)
+- **Dates stored as text** — convert ISO `yyyy-mm-dd` strings to real dates
+- **Empty columns / rows** — drop entirely-blank ones
+- **Duplicate rows** — remove exact duplicates
+
+Each detected issue is listed with a count and a checkbox (the safe ones are pre-checked); **Apply selected fixes** transforms a working copy, and **Revert to original** restores the file exactly as uploaded. Numeric/date conversions only trigger when ≥ 90% of real values parse cleanly, and date parsing is limited to unambiguous ISO formats.
+
 ### Visualize
 Build one to four charts at once from any columns in your dataset. Use the **Number of plots** selector (1–4); each plot gets its own collapsible panel with the full set of controls. Changing the number of plots **no longer resets** the plots you've already configured — settings only clear when you press **Reset settings to default**.
 
@@ -84,6 +96,10 @@ Or open `DataExplorerApp.R` in RStudio and click **Run App**.
 > **Note:** If you have the app running in one terminal and make edits, open a new R terminal and re-run rather than reloading the existing session to avoid stale state.
 
 ## Changelog
+
+### Guided Data Health panel
+- Added a **Data Health** panel to the Import tab that diagnoses common spreadsheet issues and offers opt-in, reversible fixes: clean column names, trim whitespace, standardize missing-value markers, convert numbers-stored-as-text to numeric, convert ISO date strings to dates, drop empty columns/rows, and remove duplicate rows.
+- Fixes apply to a working copy with a **Revert to original** button; numeric/date conversions are guarded (≥ 90% of real values must parse, dates ISO-only) so nothing is mangled silently.
 
 ### Pie-chart cleanup & regression export
 - **Pie charts now show only relevant controls** — theme, default color, point/bar size, axis labels, opacity, log scale, and gridlines are hidden (they had no effect on a pie).

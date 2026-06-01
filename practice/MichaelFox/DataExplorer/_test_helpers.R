@@ -140,6 +140,50 @@ chk("build: pie legend hidden",       build_ok(cat_df, mkp(type = "pie", x = "gr
 chk("code: pie palette manual",       grepl("scale_fill_manual", generate_code(cat_df, mkp(type = "pie", x = "grp", palette = "cb"))))
 chk("code: pie legend position",      grepl('legend.position = "bottom"', generate_code(cat_df, mkp(type = "pie", x = "grp", legend_pos = "bottom"))))
 
+# ---- Data Health: detection + reversible fixes ---------------------------
+clean_df <- data.frame(a = 1:5, b = letters[1:5], stringsAsFactors = FALSE)
+chk("detect: clean data -> no issues", length(detect_issues(clean_df)) == 0)
+chk("detect: mtcars -> no issues", length(detect_issues(mt)) == 0)
+
+messy <- data.frame(
+  amount = c("$1,200", "2,500", "N/A", "750"),   # numbers-as-text + NA token
+  region = c("North ", " South", "North", "N/A"), # whitespace + NA token
+  empty  = c("", "", "", ""),                     # entirely blank column
+  stringsAsFactors = FALSE
+)
+messy <- rbind(messy, messy[3, ])                  # duplicate row
+ids_messy <- vapply(detect_issues(messy), `[[`, character(1), "id")
+chk("detect: finds numeric-as-text", "numeric"   %in% ids_messy)
+chk("detect: finds whitespace",      "trim"      %in% ids_messy)
+chk("detect: finds NA tokens",       "na_tokens" %in% ids_messy)
+chk("detect: finds empty column",    "empty_cols" %in% ids_messy)
+chk("detect: finds duplicate rows",  "dups"      %in% ids_messy)
+
+cleaned <- clean_apply(messy, ids_messy)
+chk("clean: amount is now numeric",  is.numeric(cleaned$amount))
+chk("clean: $1,200 parsed to 1200",  isTRUE(cleaned$amount[1] == 1200))
+chk("clean: N/A -> NA in amount",    is.na(cleaned$amount[3]))
+chk("clean: whitespace trimmed",     identical(cleaned$region[2], "South"))
+chk("clean: empty column dropped",   !("empty" %in% names(cleaned)))
+chk("clean: duplicate row removed",  nrow(cleaned) == nrow(messy) - 1)
+chk("clean: re-diagnose is clean",   length(detect_issues(cleaned)) == 0)
+
+# num_from_text strips $, commas, %
+chk("num_from_text strips symbols", isTRUE(all.equal(num_from_text(c("$1,000", "12%")), c(1000, 12))))
+# dates_from_text honours ISO only
+chk("dates_from_text: ISO parses",   !is.null(dates_from_text(c("2020-01-02", "2021-12-31"))))
+chk("dates_from_text: ambiguous NULL", is.null(dates_from_text(c("01/02/2020", "12/31/2021"))))
+
+# Data Health UI fragment (HTML choiceNames + buttons) renders.
+dh_iss <- detect_issues(messy)
+dh_ui <- tryCatch(as.character(shiny::tagList(
+  checkboxGroupInput("dh_fixes", NULL,
+    choiceNames  = unname(lapply(dh_iss, function(z) HTML(z$desc))),
+    choiceValues = unname(vapply(dh_iss, `[[`, character(1), "id"))),
+  actionButton("dh_apply", "Apply selected fixes")
+)), error = function(e) "")
+chk("Data Health UI renders", nchar(dh_ui) > 200 && grepl("dh_fixes", dh_ui))
+
 # ---- UI: the control panel (with nested Advanced accordion) builds --------
 psp <- tryCatch(plot_slot_panel(1), error = function(e) e)
 chk("plot_slot_panel builds without error", !inherits(psp, "error"))
