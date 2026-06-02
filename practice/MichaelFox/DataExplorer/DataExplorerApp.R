@@ -44,16 +44,62 @@ BAR_MAX <- 30
 # Helper functions
 # ----------------------------------------------------------
 
+# Many real-world CSVs (e.g. BEA exports) start with a few title lines and
+# end with quoted footnotes. Find the longest contiguous run of lines that
+# share a field count > 1: that block is the header + data. Skip whatever
+# sits before/after so read.csv doesn't choke on "more columns than column
+# names" or read footnote text as data.
+detect_table_bounds <- function(path, sep, header_in = TRUE) {
+  fields <- tryCatch(
+    utils::count.fields(path, sep = sep, quote = "\"", comment.char = ""),
+    error = function(e) integer(0)
+  )
+  if (!length(fields)) return(list(skip = 0, nrows = -1L, n_skip_tail = 0L))
+  fields[is.na(fields)] <- 0L
+  if (max(fields) < 2) return(list(skip = 0, nrows = -1L, n_skip_tail = 0L))
+
+  r   <- rle(fields)
+  big <- which(r$values > 1)
+  if (!length(big)) return(list(skip = 0, nrows = -1L, n_skip_tail = 0L))
+  chosen <- big[which.max(r$lengths[big])]
+  start  <- if (chosen == 1L) 1L else sum(r$lengths[seq_len(chosen - 1L)]) + 1L
+  len    <- r$lengths[chosen]
+  total  <- length(fields)
+  end    <- start + len - 1L
+
+  # count.fields can drop a trailing blank line, so get the honest line total
+  # from readLines for the user-facing "skipped tail" count.
+  true_total <- tryCatch(length(readLines(path, warn = FALSE)),
+                         error = function(e) total)
+
+  if (start == 1L && end >= true_total)
+    return(list(skip = 0, nrows = -1L, n_skip_tail = 0L))
+
+  data_n <- if (isTRUE(header_in)) len - 1L else len
+  list(skip = start - 1L,
+       nrows = max(0L, data_n),
+       n_skip_tail = max(0L, true_total - end))
+}
+
+read_delim_smart <- function(path, sep, header, dec, reader) {
+  b <- detect_table_bounds(path, sep, header)
+  args <- list(file = path, header = header, sep = sep, dec = dec,
+               stringsAsFactors = FALSE, skip = b$skip)
+  if (b$nrows > 0) args$nrows <- b$nrows
+  d <- do.call(reader, args)
+  attr(d, "n_skip_head") <- b$skip
+  attr(d, "n_skip_tail") <- b$n_skip_tail
+  d
+}
+
 read_file_data <- function(path, ext, header = TRUE, sep = ",", dec = ".") {
   ext <- tolower(ext)
   if (ext %in% c("xlsx", "xls")) return(as.data.frame(read_excel(path)))
   if (ext == "rds")               return(as.data.frame(readRDS(path)))
   if (ext == "csv")
-    return(read.csv(path, header = header, sep = sep, dec = dec, stringsAsFactors = FALSE))
+    return(read_delim_smart(path, sep, header, dec, read.csv))
   if (ext %in% c("tsv", "txt"))
-    return(read.table(path, header = header,
-                      sep = if (ext == "tsv") "\t" else sep,
-                      dec = dec, stringsAsFactors = FALSE))
+    return(read_delim_smart(path, if (ext == "tsv") "\t" else sep, header, dec, read.table))
   stop("Unsupported file extension: .", ext)
 }
 
@@ -1125,6 +1171,10 @@ ui <- page_navbar(
   ),
   window_title = "Data Explorer",
   header = tags$head(tags$script(HTML(copy_js))),
+  # Only the plot-heavy tabs need to fill the viewport. Letting Import Data
+  # and Glossary scroll like a normal page keeps the Data Health card from
+  # being squeezed below the data preview.
+  fillable = c("Visualize", "Regression", "Export"),
 
   # ──────────────────────────────────────────────────────────
   # TAB 1 — Import Data
@@ -1474,6 +1524,14 @@ server <- function(input, output, session) {
       )
       rv$data <- d; rv$data_raw <- d
       showNotification(paste("Loaded:", input$file$name), type = "message")
+      nh <- attr(d, "n_skip_head") %||% 0L
+      nt <- attr(d, "n_skip_tail") %||% 0L
+      if (nh > 0 || nt > 0) {
+        showNotification(
+          sprintf("Auto-skipped %d title line(s) at the top and %d footnote line(s) at the bottom so the data could be read cleanly.",
+                  nh, nt),
+          type = "warning", duration = 10)
+      }
     }, error = function(e)
       showNotification(paste("Read error:", e$message), type = "error", duration = 8))
   })
