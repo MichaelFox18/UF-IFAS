@@ -132,6 +132,28 @@ chk("code: legend + gridlines",    grepl('legend.position = "bottom"', gc_th) &&
 chk("code: trend annotate",        grepl('annotate\\("text"', generate_code(mt, mkp(type = "scatter", x = "wt", y = "mpg", reg_overlay = TRUE, reg_type = "lm", trend_label = TRUE))))
 chk("code: custom alpha",          grepl("alpha = 0.3", generate_code(mt, mkp(type = "scatter", x = "wt", y = "mpg", alpha = 0.3))))
 
+# ---- plot export to file (used by the Export-tab image downloads) ---------
+tmp_png <- tempfile(fileext = ".png")
+render_plots_to_file(list(ggplot(mt, aes(wt, mpg)) + geom_point()),
+                     tmp_png, "png", 4, 3, 72)
+chk("render_plots_to_file writes a PNG", file.exists(tmp_png) && file.size(tmp_png) > 0)
+
+# ---- correlation heatmap --------------------------------------------------
+chk("build: heatmap (all numeric)", build_ok(mt, mkp(type = "heatmap")))
+chk("build: heatmap spearman + labels",
+    build_ok(mt, mkp(type = "heatmap", corr_method = "spearman", corr_label = TRUE)))
+chk("build: heatmap subset of vars",
+    build_ok(mt, mkp(type = "heatmap", corr_vars = c("mpg", "wt", "hp"))))
+chk("build: heatmap needs >= 2 numeric (NULL)",
+    is.null(build_full_plot(data.frame(g = c("a", "b"), n = 1:2), mkp(type = "heatmap"))))
+chk("hint: heatmap with < 2 numeric warns",
+    !is.null(chart_hint(data.frame(g = c("a", "b")), list(type = "heatmap"))))
+chk("hint: heatmap with enough numeric -> NULL",
+    is.null(chart_hint(mt, list(type = "heatmap"))))
+gc_h <- generate_code(mt, mkp(type = "heatmap", corr_method = "spearman"))
+chk("code: heatmap uses cor()",        grepl('cor\\(num', gc_h) && grepl('spearman', gc_h))
+chk("code: heatmap uses geom_tile",    grepl("geom_tile", gc_h))
+
 # ---- pie palette + legend -------------------------------------------------
 chk("pie_fill_scale: auto -> Scale",  inherits(pie_fill_scale("auto", 4, "g"), "Scale"))
 chk("pie_fill_scale: cb -> Scale",    inherits(pie_fill_scale("cb", 4, "g"), "Scale"))
@@ -174,6 +196,50 @@ chk("num_from_text strips symbols", isTRUE(all.equal(num_from_text(c("$1,000", "
 chk("dates_from_text: ISO parses",   !is.null(dates_from_text(c("2020-01-02", "2021-12-31"))))
 chk("dates_from_text: ambiguous NULL", is.null(dates_from_text(c("01/02/2020", "12/31/2021"))))
 
+# ---- numeric-coercion guards (ID/leading-zero columns) --------------------
+chk("has_leading_zeros: ZIP -> TRUE",       has_leading_zeros(c("02134", "90210")))
+chk("has_leading_zeros: plain ints -> FALSE", !has_leading_zeros(c("1", "23", "0", "0.5")))
+chk("is_numeric_text: money -> TRUE",       is_numeric_text(c("$1,200", "3,400", "750")))
+chk("is_numeric_text: ZIP -> FALSE",        !is_numeric_text(c("02134", "90210", "30301")))
+zips <- data.frame(zip = c("02134", "90210", "30301", "10001"), stringsAsFactors = FALSE)
+chk("clean: ZIP column not flagged numeric",
+    !("numeric" %in% vapply(detect_issues(zips), `[[`, character(1), "id")))
+
+# ---- Excel multi-sheet reading --------------------------------------------
+xl <- tempfile(fileext = ".xlsx")
+writexl::write_xlsx(list(alpha = data.frame(a = 1:3),
+                         beta  = data.frame(b = c("x", "y"))), xl)
+chk("excel_sheets lists sheets", identical(readxl::excel_sheets(xl), c("alpha", "beta")))
+d_a <- read_file_data(xl, "xlsx", sheet = "alpha")
+d_b <- read_file_data(xl, "xlsx", sheet = "beta")
+chk("read_file_data: sheet alpha", identical(names(d_a), "a") && nrow(d_a) == 3)
+chk("read_file_data: sheet beta",  identical(names(d_b), "b") && nrow(d_b) == 2)
+chk("read_file_data: default sheet is the first", identical(names(read_file_data(xl, "xlsx")), "a"))
+
+# ---- CSV import bounds (detect_table_bounds via read_file_data) -----------
+write_tmp <- function(lines) { f <- tempfile(fileext = ".csv"); writeLines(lines, f); f }
+
+d_clean <- read_file_data(write_tmp(c("a,b,c", "1,2,3", "4,5,6", "7,8,9")), "csv")
+chk("import: clean file keeps all rows", nrow(d_clean) == 3 && ncol(d_clean) == 3)
+chk("import: clean file no skip",        (attr(d_clean, "n_skip_head") %||% 0) == 0)
+
+d_msg <- read_file_data(write_tmp(c(
+  "Bureau of Stuff - Table 1", "Released 2024",
+  "year,value", "2020,10", "2021,20", "2022,30",
+  "Source: somewhere", "Note: provisional")), "csv")
+chk("import: trims title + footnote lines", nrow(d_msg) == 3 && ncol(d_msg) == 2)
+chk("import: header detected after titles", identical(names(d_msg), c("year", "value")))
+chk("import: reports 2 skipped head lines", (attr(d_msg, "n_skip_head") %||% 0) == 2)
+chk("import: reports 2 skipped tail lines", (attr(d_msg, "n_skip_tail") %||% 0) == 2)
+chk("import: no footnote text leaked",      all(d_msg$year %in% c(2020, 2021, 2022)))
+
+# regression test for the data-loss risk: an interior non-data line must NOT
+# drop the rows that follow it.
+d_gap <- read_file_data(write_tmp(c("a,b", "1,2", "3,4", "", "5,6", "7,8")), "csv")
+chk("import: interior blank line keeps all rows", nrow(d_gap) == 4)
+d_div <- read_file_data(write_tmp(c("a,b", "1,2", "3,4", "SECTION TWO", "5,6", "7,8")), "csv")
+chk("import: interior divider keeps later rows", sum(d_div$a %in% c(1, 3, 5, 7)) == 4)
+
 # Data Health UI fragment (HTML choiceNames + buttons) renders.
 dh_iss <- detect_issues(messy)
 dh_ui <- tryCatch(as.character(shiny::tagList(
@@ -183,6 +249,32 @@ dh_ui <- tryCatch(as.character(shiny::tagList(
   actionButton("dh_apply", "Apply selected fixes")
 )), error = function(e) "")
 chk("Data Health UI renders", nchar(dh_ui) > 200 && grepl("dh_fixes", dh_ui))
+
+# ---- Data overview: column profile + glance -------------------------------
+chk("friendly_type: numeric", friendly_type(c(1.5, 2.5)) == "numeric")
+chk("friendly_type: integer", friendly_type(1:5) == "integer")
+chk("friendly_type: text",    friendly_type(c("a", "b")) == "text")
+chk("friendly_type: date",    friendly_type(as.Date("2020-01-01")) == "date")
+chk("friendly_type: logical", friendly_type(c(TRUE, FALSE)) == "logical")
+
+prof <- column_profile(mt)
+chk("column_profile: one row per column", nrow(prof) == ncol(mt))
+chk("column_profile: has expected fields",
+    all(c("Column", "Type", "Missing", "Distinct", "Mean", "Top") %in% names(prof)))
+chk("column_profile: numeric col has Mean", !is.na(prof$Mean[prof$Column == "mpg"]))
+chk("column_profile: text col has Top, no Mean",
+    is.na(prof$Mean[prof$Column == "car"]) && !is.na(prof$Top[prof$Column == "car"]))
+
+# all-NA numeric column must not error or produce Inf
+prof_na <- column_profile(data.frame(x = c(1, 2, NA), y = c(NA_real_, NA, NA)))
+chk("column_profile: all-NA column -> NA (no Inf)", is.na(prof_na$Min[prof_na$Column == "y"]))
+chk("column_profile: missing % counts blanks",
+    grepl("33%", column_profile(data.frame(z = c("a", "", "b")))$Missing[1]))
+
+g <- data_glance(mt)
+chk("data_glance: row/col counts", g$n == nrow(mt) && g$m == ncol(mt))
+chk("data_glance: numeric vs categorical split", g$num == 11 && g$cat == 1)
+chk("data_glance: complete rows", g$complete == 32)
 
 # ---- UI: the control panel (with nested Advanced accordion) builds --------
 psp <- tryCatch(plot_slot_panel(1), error = function(e) e)

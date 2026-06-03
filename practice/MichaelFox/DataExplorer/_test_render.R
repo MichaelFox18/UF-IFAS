@@ -21,7 +21,10 @@ cases <- list(
                    reg_type = "lm", trend_label = TRUE),
   legend_btm = mkp(type = "scatter", x = "wt", y = "mpg", color = "cyl",
                    legend_pos = "bottom", gridlines = FALSE),
-  pie_cb     = mkp(type = "pie", x = "cyl", palette = "cb", legend_pos = "bottom")
+  pie_cb     = mkp(type = "pie", x = "cyl", palette = "cb", legend_pos = "bottom"),
+  heatmap    = mkp(type = "heatmap", corr_method = "pearson", corr_label = TRUE),
+  heatmap_sp = mkp(type = "heatmap", corr_method = "spearman",
+                   corr_vars = c("mpg", "wt", "hp", "disp"))
 )
 
 bad <- 0L

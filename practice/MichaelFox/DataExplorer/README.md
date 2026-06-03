@@ -9,7 +9,13 @@ This app allows users to upload their own data (or use the built-in `mtcars` dem
 ## Features
 
 ### Import Data
-Upload a CSV, TSV, plain-text, Excel (`.xlsx` / `.xls`), or `.rds` file, or load the built-in `mtcars` demo. Text files support comma, semicolon, tab, and space delimiters and either decimal point convention. The raw data table and a per-column summary are displayed on load. A **Clear Data** button removes the loaded dataset (and any fitted model) so you can start over.
+Upload a CSV, TSV, plain-text, Excel (`.xlsx` / `.xls`), or `.rds` file (up to 250 MB), or load the built-in `mtcars` demo. Text files support comma, semicolon, tab, and space delimiters and either decimal point convention; leading title lines and trailing footnotes in CSV/TSV exports are detected and trimmed automatically. When an Excel workbook has more than one worksheet, a **Worksheet** dropdown appears so you can choose which sheet to load (and switch between them). A **Clear Data** button removes the loaded dataset (and any fitted model) so you can start over.
+
+On load you get (top to bottom):
+- **Data Health** — the guided cleaning panel (see below), placed first so it's the first thing you address.
+- **Data Preview** — the table, with a row × column count.
+- **Summary** — headline counts (rows, columns by type, complete rows), with the classic R `summary()` for every column tucked behind an **Advanced Summary Statistics** expander so it doesn't dominate the screen on wide data.
+- **Column Profile** — a tidy one-row-per-column table (type, % missing, distinct count, and either numeric stats or the most common value).
 
 **Data Health** — a guided cleaning panel diagnoses common spreadsheet problems and offers **opt-in, reversible** fixes (it never changes your data silently):
 
@@ -26,7 +32,7 @@ Each detected issue is listed with a count and a checkbox (the safe ones are pre
 ### Visualize
 Build one to four charts at once from any columns in your dataset. Use the **Number of plots** selector (1–4); each plot gets its own collapsible panel with the full set of controls. Changing the number of plots **no longer resets** the plots you've already configured — settings only clear when you press **Reset settings to default**.
 
-- **Chart types** — Scatter, Line, Bar, Histogram, Box Plot, Pie
+- **Chart types** — Scatter, Line, Bar, Histogram, Box Plot, Pie, Correlation Heatmap
 - **X / Y variables** and an optional **Color / Group By** variable
 - **Bar aggregation** (Sum / Mean / Median) when a bar chart has a Y variable
 - **Maximum bars / slices** — a data-aware slider (bar & pie) that keeps the largest N categories and groups the rest into **Other**; defaults to a readable cap and ranges up to the number of categories in your data
@@ -64,7 +70,7 @@ Outputs include the full model summary (coefficient table with estimate, std. er
 
 **Data** — select any subset of columns and download as CSV or Excel (`.xlsx`).
 
-**Regression** — once a model is fitted on the Regression tab, export its full summary as a `.txt` file or its coefficient table as a `.csv`.
+**Regression** — once a model is fitted on the Regression tab, export its full summary (`.txt`), its coefficient table (`.csv`), and the **Fitted vs Actual** and **Residuals vs Fitted** diagnostic plots as images (using the same Format / size / DPI as Export Plots).
 
 ### Glossary
 Plain-language definitions for key terms: regression model types, R² / adjusted R², F-statistic, residuals, confidence intervals, the coefficient-table columns (estimate, std. error, t-value, p-value, intercept), and the app settings used throughout — including the newer visualization options (maximum bars/slices, color palette, opacity, jitter points, log scale, facet by, horizontal orientation, and the trendline equation label).
@@ -96,6 +102,21 @@ Or open `DataExplorerApp.R` in RStudio and click **Run App**.
 > **Note:** If you have the app running in one terminal and make edits, open a new R terminal and re-run rather than reloading the existing session to avoid stale state.
 
 ## Changelog
+
+### Large-data performance
+- Data Health and the column profile are faster on big files without any loss of exactness: the blank-cell check no longer coerces numeric columns to text, and a redundant full-column parse was removed from numeric detection. Type detection still scans every value, and charts still draw every row.
+
+### Correlation heatmap
+- New **Correlation Heatmap** chart type: correlates the numeric columns (or a chosen subset), Pearson or Spearman, on a fixed diverging UF-blue→white→orange scale with optional on-tile values. Like the pie chart, it only shows the controls that apply, and its copy-able R code reproduces the `cor()` + `geom_tile()` plot.
+
+### Excel worksheet picker
+- Multi-sheet Excel workbooks now show a **Worksheet** dropdown; pick or switch sheets and the chosen one loads (previously only the first sheet was ever read).
+
+### Import overview & robustness
+- **Column Profile** table (type, % missing, distinct, numeric stats / top value per column) replaces the raw `summary()` dump as the default; the raw output moves to an **Advanced Summary Statistics** expander in the Summary card — fixing the long-scroll problem on wide/large data.
+- **Larger uploads** (limit raised to 250 MB) so big files like a 300k-row CSV load.
+- **Safer CSV auto-trim**: title/footnote lines are trimmed by exact line span, so an interior blank or stray line can no longer drop valid rows; ID columns with leading zeros (ZIPs, phone numbers) are protected from numeric coercion.
+- A nudge under numeric-only pickers points to Data Health when a column is numbers-stored-as-text.
 
 ### Guided Data Health panel
 - Added a **Data Health** panel to the Import tab that diagnoses common spreadsheet issues and offers opt-in, reversible fixes: clean column names, trim whitespace, standardize missing-value markers, convert numbers-stored-as-text to numeric, convert ISO date strings to dates, drop empty columns/rows, and remove duplicate rows.

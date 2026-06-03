@@ -16,6 +16,10 @@ library(colourpicker)
 library(dplyr)
 library(writexl)
 
+# Shiny caps uploads at 5 MB by default; lift it so large CSVs (e.g. a
+# 300k-row, ~30 MB file) can be uploaded.
+options(shiny.maxRequestSize = 250 * 1024^2)
+
 UF_BLUE   <- "#003087"
 UF_ORANGE <- "#FA4616"
 MP_COLORS <- c(UF_BLUE, UF_ORANGE, "#2ca25f", "#8856a7")
@@ -44,57 +48,49 @@ BAR_MAX <- 30
 # Helper functions
 # ----------------------------------------------------------
 
-# Many real-world CSVs (e.g. BEA exports) start with a few title lines and
-# end with quoted footnotes. Find the longest contiguous run of lines that
-# share a field count > 1: that block is the header + data. Skip whatever
-# sits before/after so read.csv doesn't choke on "more columns than column
-# names" or read footnote text as data.
-detect_table_bounds <- function(path, sep, header_in = TRUE) {
-  fields <- tryCatch(
-    utils::count.fields(path, sep = sep, quote = "\"", comment.char = ""),
-    error = function(e) integer(0)
-  )
-  if (!length(fields)) return(list(skip = 0, nrows = -1L, n_skip_tail = 0L))
+# Many real-world CSVs (e.g. BEA exports) start with a few title lines and end
+# with quoted footnotes. The real table is the span of lines whose field count
+# matches the table's column count (the most common field count among delimited
+# lines). Given the per-line field counts, return the [start, end] physical-line
+# span of that table. Only leading/trailing non-matching lines are trimmed —
+# everything between the first and last data-shaped line is kept, so an interior
+# blank or stray line can never cause valid rows to be dropped.
+detect_table_bounds <- function(fields) {
+  none <- list(start = 1L, end = length(fields))
+  if (!length(fields)) return(list(start = 1L, end = 0L))
   fields[is.na(fields)] <- 0L
-  if (max(fields) < 2) return(list(skip = 0, nrows = -1L, n_skip_tail = 0L))
-
-  r   <- rle(fields)
-  big <- which(r$values > 1)
-  if (!length(big)) return(list(skip = 0, nrows = -1L, n_skip_tail = 0L))
-  chosen <- big[which.max(r$lengths[big])]
-  start  <- if (chosen == 1L) 1L else sum(r$lengths[seq_len(chosen - 1L)]) + 1L
-  len    <- r$lengths[chosen]
-  total  <- length(fields)
-  end    <- start + len - 1L
-
-  # count.fields can drop a trailing blank line, so get the honest line total
-  # from readLines for the user-facing "skipped tail" count.
-  true_total <- tryCatch(length(readLines(path, warn = FALSE)),
-                         error = function(e) total)
-
-  if (start == 1L && end >= true_total)
-    return(list(skip = 0, nrows = -1L, n_skip_tail = 0L))
-
-  data_n <- if (isTRUE(header_in)) len - 1L else len
-  list(skip = start - 1L,
-       nrows = max(0L, data_n),
-       n_skip_tail = max(0L, true_total - end))
+  if (max(fields) < 2) return(none)             # nothing delimited; leave as-is
+  delim <- fields[fields >= 2]
+  mfc   <- as.integer(names(which.max(table(delim))))  # table's column count
+  at    <- which(fields == mfc)
+  list(start = min(at), end = max(at))
 }
 
 read_delim_smart <- function(path, sep, header, dec, reader) {
-  b <- detect_table_bounds(path, sep, header)
-  args <- list(file = path, header = header, sep = sep, dec = dec,
-               stringsAsFactors = FALSE, skip = b$skip)
-  if (b$nrows > 0) args$nrows <- b$nrows
-  d <- do.call(reader, args)
-  attr(d, "n_skip_head") <- b$skip
-  attr(d, "n_skip_tail") <- b$n_skip_tail
+  # blank.lines.skip = FALSE keeps the field-count vector aligned 1:1 with the
+  # physical lines, so the [start, end] span can be sliced exactly.
+  fields <- tryCatch(
+    utils::count.fields(path, sep = sep, quote = "\"",
+                        comment.char = "", blank.lines.skip = FALSE),
+    error = function(e) integer(0))
+  total  <- length(fields)
+  b      <- detect_table_bounds(fields)
+  base   <- list(header = header, sep = sep, dec = dec,
+                 stringsAsFactors = FALSE, fill = TRUE, blank.lines.skip = TRUE)
+  if (b$start <= 1L && b$end >= total) {
+    d <- do.call(reader, c(list(file = path), base))           # clean: read directly
+  } else {
+    lines <- readLines(path, warn = FALSE)
+    d <- do.call(reader, c(list(text = lines[b$start:b$end]), base))
+  }
+  attr(d, "n_skip_head") <- max(0L, b$start - 1L)
+  attr(d, "n_skip_tail") <- max(0L, total - b$end)
   d
 }
 
-read_file_data <- function(path, ext, header = TRUE, sep = ",", dec = ".") {
+read_file_data <- function(path, ext, header = TRUE, sep = ",", dec = ".", sheet = 1) {
   ext <- tolower(ext)
-  if (ext %in% c("xlsx", "xls")) return(as.data.frame(read_excel(path)))
+  if (ext %in% c("xlsx", "xls")) return(as.data.frame(read_excel(path, sheet = sheet)))
   if (ext == "rds")               return(as.data.frame(readRDS(path)))
   if (ext == "csv")
     return(read_delim_smart(path, sep, header, dec, read.csv))
@@ -104,7 +100,6 @@ read_file_data <- function(path, ext, header = TRUE, sep = ",", dec = ".") {
 }
 
 label_or  <- function(custom, default) if (nzchar(trimws(custom))) custom else default
-pct_label <- function(x) paste0(round(x / sum(x) * 100, 1), "%")
 
 info_icon <- function(..., placement = "right") {
   tooltip(
@@ -146,12 +141,27 @@ NA_TOKENS <- c("", "NA", "N/A", "n/a", "NULL", "null", "#N/A", "#n/a")
 # Parse a character vector as numbers after stripping $, commas, %, spaces.
 num_from_text <- function(x) suppressWarnings(as.numeric(gsub("[,$%[:space:]]", "", x)))
 
-# Fraction of values that parse cleanly as numbers, ignoring blanks and NA
-# placeholders (so a stray "N/A" doesn't hide an otherwise-numeric column).
+# Fraction of real values that parse cleanly as numbers, ignoring blanks and NA
+# placeholders so a stray "N/A" doesn't hide a numeric column. Scans every value
+# for an exact decision.
 numeric_frac <- function(x) {
   v <- x[!is.na(x) & !(trimws(x) %in% NA_TOKENS)]
   if (!length(v)) return(0)
   mean(!is.na(num_from_text(v)))
+}
+
+# TRUE if any real value is a leading-zero code (e.g. "02134", "007"): a sign the
+# column is an identifier (ZIP, phone) where converting to a number would
+# silently drop the leading zero, so we leave such columns as text.
+has_leading_zeros <- function(x) {
+  v <- x[!is.na(x) & !(trimws(x) %in% NA_TOKENS)]
+  length(v) > 0 && any(grepl("^0[0-9]", trimws(v)))
+}
+
+# TRUE if x is character, looks numeric (>= 90% parse), and is not an ID column.
+# (numeric_frac >= 0.9 already implies at least one value parsed.)
+is_numeric_text <- function(x) {
+  is.character(x) && !has_leading_zeros(x) && numeric_frac(x) >= 0.9
 }
 
 # Returns a Date vector if >= 90% of real (non-blank, non-placeholder) values
@@ -166,8 +176,11 @@ dates_from_text <- function(x) {
   NULL
 }
 
-# Logical "is this cell blank" (NA, or empty/whitespace-only string).
-blank_cell <- function(v) is.na(v) | (is.character(v) & trimws(v) == "")
+# Logical "is this cell blank" — short-circuits on type so it never coerces a
+# numeric column to character (which dominated the cost on large data).
+blank_cell <- function(v) {
+  if (is.character(v)) is.na(v) | trimws(v) == "" else is.na(v)
+}
 
 # Each spec: default (pre-checked?), detect(df) -> HTML string or NULL,
 # apply(df) -> df. Order here is the order fixes are applied.
@@ -221,17 +234,13 @@ clean_specs <- function() list(
   numeric = list(
     default = TRUE,
     detect = function(df) {
-      cols <- names(df)[vapply(df, function(v)
-        is.character(v) && numeric_frac(v) >= 0.9 && any(!is.na(num_from_text(v))),
-        logical(1))]
+      cols <- names(df)[vapply(df, is_numeric_text, logical(1))]
       if (!length(cols)) return(NULL)
-      sprintf("<b>Numbers stored as text:</b> convert %s to numeric (strips $, commas, %%).",
+      sprintf("<b>Numbers stored as text:</b> convert %s to numeric (strips $, commas, %%; ID-style columns with leading zeros are left alone).",
               paste(sprintf("<code>%s</code>", cols), collapse = ", "))
     },
     apply = function(df) {
-      for (c in names(df)) if (is.character(df[[c]]) && numeric_frac(df[[c]]) >= 0.9 &&
-                               any(!is.na(num_from_text(df[[c]]))))
-        df[[c]] <- num_from_text(df[[c]])
+      for (c in names(df)) if (is_numeric_text(df[[c]])) df[[c]] <- num_from_text(df[[c]])
       df
     }
   ),
@@ -311,6 +320,63 @@ clean_apply <- function(df, ids) {
 }
 
 # ----------------------------------------------------------
+# Data overview — a tidy per-column profile and a one-line
+# "at a glance" summary, both far more readable than summary().
+# ----------------------------------------------------------
+
+# A plain-English column type for display.
+friendly_type <- function(x) {
+  if (inherits(x, c("Date", "POSIXct", "POSIXt"))) "date"
+  else if (is.logical(x)) "logical"
+  else if (is.factor(x))  "factor"
+  else if (is.integer(x)) "integer"
+  else if (is.numeric(x)) "numeric"
+  else "text"
+}
+
+# One row per column: type, % missing, distinct count, and either numeric
+# stats (mean/median/min/max) or the most common value for categoricals.
+column_profile <- function(df) {
+  if (is.null(df) || !ncol(df)) return(data.frame())
+  n <- nrow(df)
+  do.call(rbind, lapply(names(df), function(nm) {
+    x    <- df[[nm]]
+    num  <- is.numeric(x)
+    hasv <- any(!is.na(x))
+    miss <- sum(blank_cell(x))
+    top  <- if (!num) {
+      tb <- sort(table(as.character(x)), decreasing = TRUE)
+      if (length(tb)) sprintf("%s (%s)", substr(names(tb)[1], 1, 40),
+                              format(tb[[1]], big.mark = ",")) else NA_character_
+    } else NA_character_
+    data.frame(
+      Column   = nm,
+      Type     = friendly_type(x),
+      Missing  = sprintf("%d (%.0f%%)", miss, if (n) 100 * miss / n else 0),
+      Distinct = dplyr::n_distinct(x),
+      Mean     = if (num && hasv) round(mean(x, na.rm = TRUE), 3) else NA_real_,
+      Median   = if (num && hasv) round(stats::median(x, na.rm = TRUE), 3) else NA_real_,
+      Min      = if (num && hasv) round(min(x, na.rm = TRUE), 3) else NA_real_,
+      Max      = if (num && hasv) round(max(x, na.rm = TRUE), 3) else NA_real_,
+      Top      = top,
+      stringsAsFactors = FALSE, check.names = FALSE
+    )
+  }))
+}
+
+# Headline counts for the "At a Glance" summary.
+data_glance <- function(df) {
+  types <- vapply(df, friendly_type, character(1))
+  list(
+    n        = nrow(df), m = ncol(df),
+    num      = sum(types %in% c("numeric", "integer")),
+    cat      = sum(types %in% c("text", "factor", "logical")),
+    date     = sum(types == "date"),
+    complete = sum(stats::complete.cases(df))
+  )
+}
+
+# ----------------------------------------------------------
 # Chart-suitability helpers — keep questionable variable/chart
 # pairings from producing the "strange-looking" plots that come
 # from feeding the wrong data type into a chart.
@@ -347,7 +413,15 @@ lump_bar_x <- function(df, xv, w, n_keep) {
 # pickers so students learn *why* a chart looks off rather than just seeing a
 # mess (or an empty plot).
 chart_hint <- function(df, p) {
-  if (is.null(df) || is.null(p$type) || is.null(p$x) || !nzchar(p$x)) return(NULL)
+  if (is.null(df) || is.null(p$type)) return(NULL)
+  if (identical(p$type, "heatmap")) {
+    nums <- names(df)[vapply(df, is.numeric, logical(1))]
+    sel  <- p$corr_vars
+    k    <- if (!is.null(sel) && length(sel) >= 2) length(intersect(sel, nums)) else length(nums)
+    if (k < 2) return("A correlation heatmap needs at least <b>2 numeric columns</b> selected.")
+    return(NULL)
+  }
+  if (is.null(p$x) || !nzchar(p$x)) return(NULL)
   if (!p$x %in% names(df)) return(NULL)
   pt <- p$type
   xv <- p$x
@@ -488,6 +562,37 @@ trend_label_text <- function(df, xv, yv, meth, deg) {
   sprintf("y = %.3g %+.3g·x,  R² = %.3f", co[1], co[2], r2)
 }
 
+# Correlation heatmap over the numeric columns (or a chosen subset). Uses a
+# diverging UF-blue→white→orange fill fixed to [-1, 1] so colour is comparable.
+build_corr_heatmap <- function(df, p) {
+  num <- names(df)[vapply(df, is.numeric, logical(1))]
+  sel <- p$corr_vars
+  if (!is.null(sel) && length(sel) >= 2) num <- intersect(sel, num)
+  if (length(num) < 2) return(NULL)
+  method <- p$corr_method %||% "pearson"
+  cm <- suppressWarnings(stats::cor(df[num], use = "pairwise.complete.obs", method = method))
+  dd <- as.data.frame(as.table(cm), stringsAsFactors = TRUE)
+  names(dd) <- c("Var1", "Var2", "value")
+  dd$Var2 <- factor(dd$Var2, levels = rev(levels(dd$Var2)))   # diagonal top-left → bottom-right
+  dd$lab  <- ifelse(is.na(dd$value), "", sprintf("%.2f", dd$value))
+  title <- if (!is.null(p$title) && nzchar(trimws(p$title))) p$title
+           else sprintf("Correlation Heatmap (%s)", tools::toTitleCase(method))
+  g <- ggplot(dd, aes(.data[["Var1"]], .data[["Var2"]], fill = .data[["value"]])) +
+    geom_tile(color = "white", linewidth = 0.4) +
+    scale_fill_gradient2(low = UF_BLUE, mid = "white", high = UF_ORANGE,
+                         midpoint = 0, limits = c(-1, 1), name = "r") +
+    coord_fixed() +
+    labs(title = title, x = NULL, y = NULL) +
+    theme_minimal(base_size = 13) +
+    theme(plot.title  = element_text(hjust = 0.5, face = "bold", size = 14),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid  = element_blank(),
+          legend.position = p$legend_pos %||% "right")
+  if (isTRUE(p$corr_label) && length(num) <= 15)
+    g <- g + geom_text(aes(label = .data[["lab"]]), size = 3, color = "gray20")
+  g
+}
+
 # ----------------------------------------------------------
 # Plot builder — one function used by every plot slot,
 # the Visualize previews, and the Export tab.
@@ -500,7 +605,9 @@ trend_label_text <- function(df, xv, yv, meth, deg) {
 # ----------------------------------------------------------
 
 build_full_plot <- function(df, p) {
-  if (is.null(df) || is.null(p$type) || is.null(p$x) || !nzchar(p$x)) return(NULL)
+  if (is.null(df) || is.null(p$type)) return(NULL)
+  if (identical(p$type, "heatmap")) return(build_corr_heatmap(df, p))
+  if (is.null(p$x) || !nzchar(p$x)) return(NULL)
   if (!p$x %in% names(df)) return(NULL)
 
   pt <- p$type
@@ -758,8 +865,41 @@ bq <- function(n) {
 }
 qq <- function(s) sprintf('"%s"', gsub('"', '\\\\"', s))
 
+# Runnable snippet for the correlation heatmap (mirrors build_corr_heatmap).
+generate_corr_code <- function(df, p) {
+  num <- names(df)[vapply(df, is.numeric, logical(1))]
+  sel <- p$corr_vars
+  if (!is.null(sel) && length(sel) >= 2) num <- intersect(sel, num)
+  if (length(num) < 2)
+    return("# A correlation heatmap needs at least two numeric columns.")
+  method <- p$corr_method %||% "pearson"
+  title  <- if (!is.null(p$title) && nzchar(trimws(p$title))) p$title
+            else sprintf("Correlation Heatmap (%s)", tools::toTitleCase(method))
+  pre <- "num <- df[sapply(df, is.numeric)]"
+  if (!is.null(sel) && length(sel) >= 2)
+    pre <- c(pre, sprintf("num <- num[, c(%s)]",
+                          paste(vapply(num, qq, character(1)), collapse = ", ")))
+  pre <- c(pre,
+           sprintf('cm  <- cor(num, use = "pairwise.complete.obs", method = "%s")', method),
+           "dd  <- as.data.frame(as.table(cm))")
+  lab <- if (isTRUE(p$corr_label))
+           '\n  geom_text(aes(label = sprintf("%.2f", Freq)), size = 3, color = "gray20") +' else ""
+  code <- paste0(
+    "ggplot(dd, aes(Var1, Var2, fill = Freq)) +",
+    '\n  geom_tile(color = "white") +', lab,
+    sprintf('\n  scale_fill_gradient2(low = "%s", mid = "white", high = "%s", midpoint = 0, limits = c(-1, 1), name = "r") +',
+            UF_BLUE, UF_ORANGE),
+    '\n  coord_fixed() +',
+    '\n  theme_minimal() +',
+    '\n  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +',
+    sprintf("\n  labs(title = %s, x = NULL, y = NULL)", qq(title)))
+  assemble_code(pre, code, FALSE)
+}
+
 generate_code <- function(df, p) {
-  if (is.null(df) || is.null(p$type) || is.null(p$x) || !nzchar(p$x))
+  if (is.null(df) || is.null(p$type)) return("# Choose a chart type to generate R code.")
+  if (identical(p$type, "heatmap")) return(generate_corr_code(df, p))
+  if (is.null(p$x) || !nzchar(p$x))
     return("# Choose a chart type and an X variable to generate R code.")
 
   pt <- p$type
@@ -1031,11 +1171,22 @@ plot_slot_panel <- function(i) {
     selectInput(paste0("mp", i, "_type"), "Chart Type",
                 choices = c("Scatter Plot" = "scatter", "Line Graph" = "line",
                             "Bar Chart" = "bar", "Histogram" = "histogram",
-                            "Box Plot" = "boxplot", "Pie Chart" = "pie")),
+                            "Box Plot" = "boxplot", "Pie Chart" = "pie",
+                            "Correlation Heatmap" = "heatmap")),
     uiOutput(paste0("ui_mp", i, "_x")),
     uiOutput(paste0("ui_mp", i, "_y")),
     uiOutput(paste0("ui_mp", i, "_color")),
     uiOutput(paste0("ui_mp", i, "_hint")),
+    # Correlation heatmap has its own controls (it uses numeric columns, no X/Y).
+    conditionalPanel(
+      sprintf("input.mp%d_type == 'heatmap'", i),
+      uiOutput(paste0("ui_mp", i, "_corrvars")),
+      radioButtons(paste0("mp", i, "_corrmethod"),
+                   tags$span("Correlation Method",
+                             info_icon("Pearson measures straight-line association; Spearman ranks the values first, capturing any monotonic (including non-linear) relationship.")),
+                   choices = c("Pearson" = "pearson", "Spearman" = "spearman"), inline = TRUE),
+      checkboxInput(paste0("mp", i, "_corrlabel"), "Show correlation values", TRUE)
+    ),
     conditionalPanel(
       sprintf("input.mp%d_type == 'bar'", i),
       selectInput(paste0("mp", i, "_baragg"),
@@ -1054,14 +1205,14 @@ plot_slot_panel <- function(i) {
     textInput(paste0("mp", i, "_title"), "Title",        placeholder = "(optional)"),
     # Pie charts have no axes, so axis labels don't apply.
     conditionalPanel(
-      sprintf("input.mp%d_type != 'pie'", i),
+      sprintf("input.mp%d_type != 'pie' && input.mp%d_type != 'heatmap'", i, i),
       textInput(paste0("mp", i, "_xlab"),  "X-Axis Label", placeholder = "auto"),
       textInput(paste0("mp", i, "_ylab"),  "Y-Axis Label", placeholder = "auto")
     ),
     # Theme / default color / size are meaningless for a pie (it uses a fixed
     # legend-driven layout and the palette controls its colors), so hide them.
     conditionalPanel(
-      sprintf("input.mp%d_type != 'pie'", i),
+      sprintf("input.mp%d_type != 'pie' && input.mp%d_type != 'heatmap'", i, i),
       tags$hr(),
       tags$h6("Style"),
       selectInput(paste0("mp", i, "_theme"), "Theme",
@@ -1099,15 +1250,18 @@ plot_slot_panel <- function(i) {
     accordion(
       open = FALSE,
       accordion_panel(
-        icon("sliders"), " Advanced options",
+        tagList(icon("sliders"), " Advanced options"),
         value = paste0("adv", i),
-        selectInput(paste0("mp", i, "_palette"),
-                    tags$span("Color Palette",
-                              info_icon("Colors for grouped charts and for the slices of a pie chart. “Automatic” keeps the built-in choice; “Colorblind-safe” uses the Okabe–Ito palette.")),
-                    choices = PALETTES),
+        conditionalPanel(
+          sprintf("input.mp%d_type != 'heatmap'", i),
+          selectInput(paste0("mp", i, "_palette"),
+                      tags$span("Color Palette",
+                                info_icon("Colors for grouped charts and for the slices of a pie chart. “Automatic” keeps the built-in choice; “Colorblind-safe” uses the Okabe–Ito palette.")),
+                      choices = PALETTES)
+        ),
         # Opacity / log scale / gridlines don't apply to a pie chart.
         conditionalPanel(
-          sprintf("input.mp%d_type != 'pie'", i),
+          sprintf("input.mp%d_type != 'pie' && input.mp%d_type != 'heatmap'", i, i),
           sliderInput(paste0("mp", i, "_alpha"), "Opacity",
                       min = 0.1, max = 1, value = 0.8, step = 0.05)
         ),
@@ -1119,7 +1273,7 @@ plot_slot_panel <- function(i) {
                         FALSE)
         ),
         conditionalPanel(
-          sprintf("input.mp%d_type != 'pie'", i),
+          sprintf("input.mp%d_type != 'pie' && input.mp%d_type != 'heatmap'", i, i),
           selectInput(paste0("mp", i, "_logscale"),
                       tags$span("Log Scale",
                                 info_icon("Log10-transforms an axis — useful for skewed or wide-ranging values. Applied only to continuous axes.")),
@@ -1137,7 +1291,7 @@ plot_slot_panel <- function(i) {
                         FALSE)
         ),
         conditionalPanel(
-          sprintf("input.mp%d_type != 'pie'", i),
+          sprintf("input.mp%d_type != 'pie' && input.mp%d_type != 'heatmap'", i, i),
           checkboxInput(paste0("mp", i, "_grid"), "Show gridlines", TRUE)
         )
       )
@@ -1171,10 +1325,10 @@ ui <- page_navbar(
   ),
   window_title = "Data Explorer",
   header = tags$head(tags$script(HTML(copy_js))),
-  # Only the plot-heavy tabs need to fill the viewport. Letting Import Data
-  # and Glossary scroll like a normal page keeps the Data Health card from
-  # being squeezed below the data preview.
-  fillable = c("Visualize", "Regression", "Export"),
+  # Only the plot-heavy tabs need to fill the viewport. Import Data, Export, and
+  # Glossary scroll like a normal page so their stacked cards (Data Health, the
+  # regression-export panel) are never squeezed into a sliver.
+  fillable = c("Visualize", "Regression"),
 
   # ──────────────────────────────────────────────────────────
   # TAB 1 — Import Data
@@ -1191,6 +1345,7 @@ ui <- page_navbar(
           buttonLabel = "Browse...",
           placeholder = "CSV, Excel, TSV, RDS..."
         ),
+        uiOutput("ui_sheet"),
         hr(),
         h6("Text File Options"),
         checkboxInput("header", "First row is header", TRUE),
@@ -1206,20 +1361,34 @@ ui <- page_navbar(
         actionButton("clear_data", "Clear Data",
                      class = "btn-outline-danger w-100", icon = icon("trash"))
       ),
-      layout_columns(
-        card(
-          card_header(icon("eye"), " Data Preview"),
-          DTOutput("tbl_preview")
-        ),
-        card(
-          card_header(icon("chart-bar"), " Summary Statistics"),
-          verbatimTextOutput("tbl_summary")
-        ),
-        col_widths = c(8, 4)
-      ),
+      # Data Health first — the first thing to check/fix after an upload.
       card(
         card_header(icon("broom"), " Data Health"),
         uiOutput("data_health_ui")
+      ),
+      layout_columns(
+        col_widths = c(8, 4),
+        card(
+          card_header(icon("eye"), " Data Preview"),
+          DTOutput("tbl_preview"),
+          uiOutput("preview_caption")
+        ),
+        card(
+          card_header(icon("chart-bar"), " Summary"),
+          uiOutput("data_glance_ui"),
+          accordion(
+            open = FALSE,
+            accordion_panel(
+              tagList(icon("terminal"), " Advanced Summary Statistics"),
+              value = "adv_summary",
+              verbatimTextOutput("tbl_summary_raw")
+            )
+          )
+        )
+      ),
+      card(
+        card_header(icon("list"), " Column Profile"),
+        DTOutput("tbl_profile")
       )
     )
   ),
@@ -1375,9 +1544,15 @@ ui <- page_navbar(
           width = 260,
           tags$p(class = "text-muted small",
                  "Exports the model fitted on the Regression tab."),
-          downloadButton("dl_exp_reg_txt", "Summary (.txt)",      class = "btn-success w-100"),
+          downloadButton("dl_exp_reg_txt", "Summary (.txt)",        class = "btn-success w-100"),
           br(), br(),
-          downloadButton("dl_exp_reg_csv", "Coefficients (.csv)", class = "btn-info w-100")
+          downloadButton("dl_exp_reg_csv", "Coefficients (.csv)",   class = "btn-info w-100"),
+          br(), br(),
+          downloadButton("dl_exp_reg_fit", "Fitted vs Actual",      class = "btn-info w-100"),
+          br(), br(),
+          downloadButton("dl_exp_reg_resid", "Residuals vs Fitted", class = "btn-info w-100"),
+          tags$p(class = "text-muted small mt-2",
+                 "Plots use the Format / size / DPI chosen under Export Plots.")
         ),
         verbatimTextOutput("reg_export_preview")
       )
@@ -1479,6 +1654,9 @@ ui <- page_navbar(
             tags$dt("Facet By (small multiples)"),
             tags$dd("Splits one chart into a grid of small panels — one per category of the chosen variable — so you can compare groups side by side (e.g. one scatter per region). All panels share the same axes for easy comparison."),
             tags$hr(),
+            tags$dt("Correlation Heatmap (Pearson vs Spearman)"),
+            tags$dd("A grid showing how strongly each pair of numeric columns moves together, from −1 (perfect inverse) through 0 (none) to +1 (perfect positive). 'Pearson' measures straight-line association; 'Spearman' ranks the values first, so it also captures monotonic but curved relationships and is less sensitive to outliers."),
+            tags$hr(),
             tags$dt("Horizontal orientation"),
             tags$dd("Flips a bar or box plot onto its side. This is the easiest fix when category labels are long or there are many of them and they overlap along the bottom."),
             tags$hr(),
@@ -1502,44 +1680,75 @@ server <- function(input, output, session) {
 
   # `reset` is bumped to force the plot-config UI to rebuild at its defaults.
   # `data_raw` keeps the file exactly as uploaded so Data Health can revert.
-  rv <- reactiveValues(data = NULL, data_raw = NULL, model = NULL, reset = 0L)
+  # `upload`/`sheets`/`loaded_sheet` track the current file for Excel re-reads.
+  rv <- reactiveValues(data = NULL, data_raw = NULL, model = NULL, reset = 0L,
+                       upload = NULL, sheets = NULL, loaded_sheet = NULL)
 
   # ── Load data ─────────────────────────────────────────────
+
+  # Read the current upload (rv$upload) — for the chosen Excel sheet, or NULL
+  # for non-Excel files — and install it as both the working and original data.
+  load_upload <- function(sheet = NULL) {
+    u <- rv$upload
+    req(u)
+    tryCatch({
+      d <- read_file_data(u$path, u$ext, header = input$header,
+                          sep = input$sep, dec = input$dec, sheet = sheet %||% 1)
+      rv$data <- d; rv$data_raw <- d; rv$loaded_sheet <- sheet
+      showNotification(
+        if (!is.null(sheet)) sprintf("Loaded %s — sheet “%s”", u$name, sheet)
+        else paste("Loaded:", u$name),
+        type = "message")
+      nh <- attr(d, "n_skip_head") %||% 0L
+      nt <- attr(d, "n_skip_tail") %||% 0L
+      if (nh > 0 || nt > 0)
+        showNotification(
+          sprintf("Auto-skipped %d title line(s) at the top and %d footnote line(s) at the bottom so the data could be read cleanly.",
+                  nh, nt),
+          type = "warning", duration = 10)
+    }, error = function(e)
+      showNotification(paste("Read error:", e$message), type = "error", duration = 8))
+  }
 
   observeEvent(input$load_example, {
     d <- as.data.frame(mtcars)
     d$car <- rownames(d)
     rownames(d) <- NULL
     rv$data <- d; rv$data_raw <- d
+    rv$upload <- NULL; rv$sheets <- NULL; rv$loaded_sheet <- NULL
     showNotification("Loaded example dataset: mtcars (Motor Trend Cars)", type = "message")
   })
 
   observeEvent(input$file, {
     req(input$file)
-    ext <- tools::file_ext(input$file$name)
-    tryCatch({
-      d <- read_file_data(
-        input$file$datapath, ext,
-        header = input$header, sep = input$sep, dec = input$dec
-      )
-      rv$data <- d; rv$data_raw <- d
-      showNotification(paste("Loaded:", input$file$name), type = "message")
-      nh <- attr(d, "n_skip_head") %||% 0L
-      nt <- attr(d, "n_skip_tail") %||% 0L
-      if (nh > 0 || nt > 0) {
-        showNotification(
-          sprintf("Auto-skipped %d title line(s) at the top and %d footnote line(s) at the bottom so the data could be read cleanly.",
-                  nh, nt),
-          type = "warning", duration = 10)
-      }
-    }, error = function(e)
-      showNotification(paste("Read error:", e$message), type = "error", duration = 8))
+    ext <- tolower(tools::file_ext(input$file$name))
+    rv$upload <- list(path = input$file$datapath, ext = ext, name = input$file$name)
+    rv$sheets <- if (ext %in% c("xlsx", "xls"))
+                   tryCatch(readxl::excel_sheets(input$file$datapath),
+                            error = function(e) NULL)
+                 else NULL
+    load_upload(sheet = if (length(rv$sheets)) rv$sheets[1] else NULL)
   })
 
+  # Worksheet picker — only shown for a multi-sheet Excel upload.
+  output$ui_sheet <- renderUI({
+    if (length(rv$sheets) < 2) return(NULL)
+    selectInput("sheet",
+                tags$span("Worksheet",
+                          info_icon("This Excel workbook has multiple sheets — pick which one to load.")),
+                choices = rv$sheets, selected = rv$loaded_sheet %||% rv$sheets[1])
+  })
+
+  observeEvent(input$sheet, {
+    req(rv$upload, input$sheet)
+    if (!isTRUE(rv$upload$ext %in% c("xlsx", "xls"))) return()
+    if (identical(input$sheet, rv$loaded_sheet)) return()   # already loaded
+    load_upload(sheet = input$sheet)
+  }, ignoreInit = TRUE)
+
   observeEvent(input$clear_data, {
-    rv$data  <- NULL
-    rv$data_raw <- NULL
-    rv$model <- NULL
+    rv$data <- NULL; rv$data_raw <- NULL; rv$model <- NULL
+    rv$upload <- NULL; rv$sheets <- NULL; rv$loaded_sheet <- NULL
     showNotification("Cleared the loaded data.", type = "message")
   })
 
@@ -1548,11 +1757,24 @@ server <- function(input, output, session) {
   output$data_health_ui <- renderUI({
     if (is.null(rv$data))
       return(helpText("Load a dataset to run a quick health check."))
+
+    # "Revert" is meaningful only once the working copy differs from the
+    # upload — and it must stay visible after a fix is applied, including once
+    # everything is clean (the old code dropped it in the all-clear state).
+    cleaned    <- !is.null(rv$data_raw) && !identical(rv$data, rv$data_raw)
+    revert_btn <- if (cleaned)
+      actionButton("dh_revert", "Revert to original",
+                   class = "btn-outline-secondary btn-sm", icon = icon("rotate-left"))
+
     iss <- detect_issues(rv$data)
     if (!length(iss))
-      return(div(class = "alert alert-success py-2 px-3 mb-0",
-                 icon("circle-check"),
-                 " No common data issues detected — your data is ready to explore."))
+      return(tagList(
+        div(class = "alert alert-success py-2 px-3",
+            icon("circle-check"),
+            if (cleaned) " All clear — fixes applied. Your data is ready to explore."
+            else         " No common data issues detected — your data is ready to explore."),
+        revert_btn
+      ))
     # choiceNames/Values must be unnamed (detect_issues returns a named list).
     ids  <- unname(vapply(iss, `[[`, character(1), "id"))
     defs <- unname(vapply(iss, `[[`, logical(1), "default"))
@@ -1568,8 +1790,7 @@ server <- function(input, output, session) {
       div(class = "d-flex gap-2",
           actionButton("dh_apply", "Apply selected fixes",
                        class = "btn-primary btn-sm", icon = icon("broom")),
-          actionButton("dh_revert", "Revert to original",
-                       class = "btn-outline-secondary btn-sm", icon = icon("rotate-left"))),
+          revert_btn),
       tags$div(class = "form-text mt-2",
                "Fixes apply to a working copy used by the rest of the app; Revert restores the file exactly as uploaded.")
     )
@@ -1600,7 +1821,37 @@ server <- function(input, output, session) {
               options = list(scrollX = TRUE, pageLength = 10, dom = "tip"))
   })
 
-  output$tbl_summary <- renderPrint({
+  output$preview_caption <- renderUI({
+    req(rv$data)
+    tags$div(class = "form-text",
+             sprintf("%s rows × %s columns",
+                     format(nrow(rv$data), big.mark = ","),
+                     format(ncol(rv$data), big.mark = ",")))
+  })
+
+  output$data_glance_ui <- renderUI({
+    req(rv$data)
+    g   <- data_glance(rv$data)
+    pct <- if (g$n) round(100 * g$complete / g$n) else 0
+    tags$ul(
+      class = "list-unstyled small mb-2",
+      tags$li(tags$b(format(g$n, big.mark = ",")), " rows"),
+      tags$li(tags$b(format(g$m, big.mark = ",")), " columns ",
+              tags$span(class = "text-muted",
+                        sprintf("(%d numeric, %d categorical%s)", g$num, g$cat,
+                                if (g$date) sprintf(", %d date", g$date) else ""))),
+      tags$li(tags$b(sprintf("%s (%d%%)", format(g$complete, big.mark = ","), pct)),
+              " complete rows")
+    )
+  })
+
+  output$tbl_profile <- renderDT({
+    req(rv$data)
+    datatable(column_profile(rv$data), rownames = FALSE, class = "compact stripe",
+              options = list(scrollX = TRUE, pageLength = 12, dom = "tip"))
+  })
+
+  output$tbl_summary_raw <- renderPrint({
     req(rv$data)
     summary(rv$data)
   })
@@ -1620,6 +1871,22 @@ server <- function(input, output, session) {
       (is_discrete_col(x) || (is.numeric(x) && dplyr::n_distinct(x) <= 10)) &&
         dplyr::n_distinct(x) <= 30, logical(1))]
   })
+  # Columns that look numeric but are stored as text — used to explain why they
+  # are absent from numeric-only pickers (and to point at the fix).
+  text_numeric_cols <- reactive({
+    req(rv$data)
+    names(rv$data)[vapply(rv$data, is_numeric_text, logical(1))]
+  })
+  text_num_note <- function() {
+    tn <- text_numeric_cols()
+    if (!length(tn)) return(NULL)
+    tags$div(class = "form-text",
+             sprintf("Heads up: %d column%s look numeric but are stored as text (%s). Convert %s in Data Health to plot %s.",
+                     length(tn), if (length(tn) == 1) "" else "s",
+                     paste(tn, collapse = ", "),
+                     if (length(tn) == 1) "it" else "them",
+                     if (length(tn) == 1) "it" else "them"))
+  }
 
   # ── Visualize: configuration accordion (1–4 plots) ────────
   #
@@ -1644,11 +1911,14 @@ server <- function(input, output, session) {
       output[[paste0("ui_mp", idx, "_x")]] <- renderUI({
         req(rv$data); rv$reset
         ty <- input[[paste0("mp", idx, "_type")]] %||% "scatter"
+        if (identical(ty, "heatmap")) return(NULL)   # heatmap has its own controls
         # Histograms can only bin a numeric column, so restrict the choices
         # rather than letting a text column produce a broken/empty plot.
         if (identical(ty, "histogram"))
-          return(selectInput(paste0("mp", idx, "_xvar"), "X Variable (numeric)",
-                             choices = cols_num()))
+          return(tagList(
+            selectInput(paste0("mp", idx, "_xvar"), "X Variable (numeric)",
+                        choices = cols_num()),
+            text_num_note()))
         lbl <- if (identical(ty, "pie")) "Category (one slice per value)" else "X Variable"
         selectInput(paste0("mp", idx, "_xvar"), lbl, choices = cols_all())
       })
@@ -1656,6 +1926,7 @@ server <- function(input, output, session) {
         req(rv$data); rv$reset
         ty <- input[[paste0("mp", idx, "_type")]]
         req(ty)
+        if (ty == "heatmap") return(NULL)
         if (ty == "histogram")
           return(helpText("Histograms use only an X variable."))
         if (ty == "pie")
@@ -1663,15 +1934,25 @@ server <- function(input, output, session) {
             label = tags$span("Slice Size",
               info_icon("Optional. By default each slice is the COUNT of rows in that category. Pick a numeric variable to size slices by its SUM within each category instead.")),
             choices = c("Count of each category" = "__count__", cols_num())))
-        selectInput(paste0("mp", idx, "_yvar"), "Y Variable", choices = cols_num())
+        tagList(
+          selectInput(paste0("mp", idx, "_yvar"), "Y Variable", choices = cols_num()),
+          text_num_note())
       })
       output[[paste0("ui_mp", idx, "_color")]] <- renderUI({
         req(rv$data); rv$reset
         ty <- input[[paste0("mp", idx, "_type")]]
         req(ty)
-        if (ty == "pie") return(NULL)
+        if (ty %in% c("pie", "heatmap")) return(NULL)
         selectInput(paste0("mp", idx, "_colorvar"), "Color / Group By (optional)",
                     choices = c("None" = "__none__", cols_all()))
+      })
+      output[[paste0("ui_mp", idx, "_corrvars")]] <- renderUI({
+        req(rv$data); rv$reset
+        nums <- cols_num()
+        selectInput(paste0("mp", idx, "_corrvarsv"),
+                    tags$span("Variables",
+                              info_icon("Numeric columns to correlate — defaults to all; pick a subset to focus the matrix.")),
+                    choices = nums, selected = nums, multiple = TRUE)
       })
       output[[paste0("ui_mp", idx, "_hint")]] <- renderUI({
         req(rv$data, input[[paste0("mp", idx, "_type")]])
@@ -1683,7 +1964,7 @@ server <- function(input, output, session) {
       output[[paste0("ui_mp", idx, "_facet")]] <- renderUI({
         req(rv$data); rv$reset
         ty <- input[[paste0("mp", idx, "_type")]]
-        if (identical(ty, "pie")) return(NULL)
+        if (isTRUE(ty %in% c("pie", "heatmap"))) return(NULL)
         selectInput(paste0("mp", idx, "_facetvar"),
                     tags$span("Facet By (small multiples)",
                               info_icon("Splits the chart into one panel per category of this variable. Only categorical / low-cardinality columns are offered.")),
@@ -1701,12 +1982,13 @@ server <- function(input, output, session) {
         req(xv, xv %in% names(rv$data))
         nx <- dplyr::n_distinct(rv$data[[xv]])
         if (nx <= 2) return(NULL)
-        unit <- if (ty == "bar") "bars" else "slices"
+        unit  <- if (ty == "bar") "bars" else "slices"
+        cap   <- min(nx, 200L)            # a slider that runs to thousands is unusable
         deflt <- min(if (ty == "bar") BAR_MAX else PIE_MAX, nx)
         sliderInput(paste0("mp", idx, "_catlimitv"),
           tags$span(sprintf("Maximum %s", unit),
-            info_icon(sprintf("Keeps the largest categories and groups the rest into a single “Other” slice/bar. Defaults to %d for readability — slide up to show more (max %d), or down to simplify.", deflt, nx))),
-          min = 2, max = nx, value = deflt, step = 1)
+            info_icon(sprintf("Keeps the largest categories and groups the rest into a single “Other” slice/bar. Defaults to %d for readability — slide up to show more (up to %d), or down to simplify.", deflt, cap))),
+          min = 2, max = cap, value = deflt, step = 1)
       })
     })
   }
@@ -1727,6 +2009,9 @@ server <- function(input, output, session) {
       bins        = input[[paste0("mp", i, "_bins")]],
       bar_agg     = input[[paste0("mp", i, "_baragg")]],
       cat_limit   = input[[paste0("mp", i, "_catlimitv")]],
+      corr_method = input[[paste0("mp", i, "_corrmethod")]] %||% "pearson",
+      corr_label  = isTRUE(input[[paste0("mp", i, "_corrlabel")]]),
+      corr_vars   = input[[paste0("mp", i, "_corrvarsv")]],
       reg_overlay = isTRUE(input[[paste0("mp", i, "_reg")]]),
       reg_type    = input[[paste0("mp", i, "_regtype")]],
       reg_deg     = input[[paste0("mp", i, "_regdeg")]],
@@ -1751,7 +2036,7 @@ server <- function(input, output, session) {
     out <- list()
     for (i in seq_len(n)) {
       pr <- slot_params(i)
-      if (is.null(pr$x) || !nzchar(pr$x)) next
+      if (!identical(pr$type, "heatmap") && (is.null(pr$x) || !nzchar(pr$x))) next
       pl <- tryCatch(build_full_plot(rv$data, pr), error = function(e) NULL)
       if (!is.null(pl)) out[[length(out) + 1]] <- pl
     }
@@ -1806,9 +2091,9 @@ server <- function(input, output, session) {
         )
       } else {
         tagList(
-          conditionalPanel(sprintf("input.mp%d_type != 'pie'", i),
+          conditionalPanel(sprintf("input.mp%d_type != 'pie' && input.mp%d_type != 'heatmap'", i, i),
                            plotlyOutput(paste0("mp_ly", i), height = ph)),
-          conditionalPanel(sprintf("input.mp%d_type == 'pie'", i),
+          conditionalPanel(sprintf("input.mp%d_type == 'pie' || input.mp%d_type == 'heatmap'", i, i),
                            plotOutput(paste0("mp_st", i), height = ph))
         )
       }
@@ -1819,7 +2104,7 @@ server <- function(input, output, session) {
         accordion(
           open = FALSE,
           accordion_panel(
-            icon("code"), " R code for this plot",
+            tagList(icon("code"), " R code for this plot"),
             value = paste0("code_panel", i),
             tags$button("Copy code", class = "btn btn-sm btn-outline-primary mb-2",
                         onclick = sprintf("DEcopy('code_plot%d', this)", i)),
@@ -1837,7 +2122,7 @@ server <- function(input, output, session) {
       output[[paste0("mp_ly", idx)]] <- renderPlotly({
         req(rv$data)
         pr <- slot_params(idx)
-        req(pr$x)
+        if (!identical(pr$type, "heatmap")) req(pr$x)
         p <- build_full_plot(rv$data, pr)
         req(p)
         ggplotly(p) |> layout(margin = list(t = 55, b = 55))
@@ -1845,13 +2130,13 @@ server <- function(input, output, session) {
       output[[paste0("mp_st", idx)]] <- renderPlot({
         req(rv$data)
         pr <- slot_params(idx)
-        req(pr$x)
+        if (!identical(pr$type, "heatmap")) req(pr$x)
         build_full_plot(rv$data, pr)
       }, bg = "white")
       output[[paste0("code_plot", idx)]] <- renderText({
         req(rv$data)
         pr <- slot_params(idx)
-        req(pr$x)
+        if (!identical(pr$type, "heatmap")) req(pr$x)
         generate_code(rv$data, pr)
       })
     })
@@ -1960,32 +2245,39 @@ server <- function(input, output, session) {
               format(BIG_ROWS, big.mark = ","), format(n, big.mark = ","))
     else NULL
 
+  # Diagnostic ggplots, shared by the on-screen plotly views and the Export tab
+  # image downloads so both look identical.
+  reg_fitted_gg <- function(model) {
+    d <- data.frame(actual = model$model[[1]], fitted = fitted(model))
+    note <- thin_note(nrow(d)); d <- thin_rows(d)
+    ggplot(d, aes(x = actual, y = fitted)) +
+      geom_point(color = UF_BLUE, size = 2.5, alpha = 0.7) +
+      geom_abline(color = UF_ORANGE, linetype = "dashed", linewidth = 1) +
+      theme_minimal(base_size = 12) +
+      labs(title = "Fitted vs Actual", subtitle = note, x = "Actual", y = "Fitted") +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+            plot.subtitle = element_text(hjust = 0.5, size = 9, color = "#777"))
+  }
+  reg_resid_gg <- function(model) {
+    d <- data.frame(fitted = fitted(model), resid = residuals(model))
+    note <- thin_note(nrow(d)); d <- thin_rows(d)
+    ggplot(d, aes(x = fitted, y = resid)) +
+      geom_point(color = UF_BLUE, size = 2.5, alpha = 0.7) +
+      geom_hline(yintercept = 0, color = UF_ORANGE, linetype = "dashed", linewidth = 1) +
+      theme_minimal(base_size = 12) +
+      labs(title = "Residuals vs Fitted", subtitle = note, x = "Fitted Values", y = "Residuals") +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+            plot.subtitle = element_text(hjust = 0.5, size = 9, color = "#777"))
+  }
+
   output$reg_plot_fitted <- renderPlotly({
     req(rv$model)
-    d <- data.frame(actual = rv$model$model[[1]], fitted = fitted(rv$model))
-    note <- thin_note(nrow(d)); d <- thin_rows(d)
-    p <- ggplot(d, aes(x = actual, y = fitted)) +
-         geom_point(color = UF_BLUE, size = 2.5, alpha = 0.7) +
-         geom_abline(color = UF_ORANGE, linetype = "dashed", linewidth = 1) +
-         theme_minimal(base_size = 12) +
-         labs(title = "Fitted vs Actual", subtitle = note, x = "Actual", y = "Fitted") +
-         theme(plot.title = element_text(hjust = 0.5, face = "bold"),
-               plot.subtitle = element_text(hjust = 0.5, size = 9, color = "#777"))
-    ggplotly(p) |> layout(margin = list(t = 90, b = 40, l = 55, r = 20))
+    ggplotly(reg_fitted_gg(rv$model)) |> layout(margin = list(t = 90, b = 40, l = 55, r = 20))
   })
 
   output$reg_plot_resid <- renderPlotly({
     req(rv$model)
-    d <- data.frame(fitted = fitted(rv$model), resid = residuals(rv$model))
-    note <- thin_note(nrow(d)); d <- thin_rows(d)
-    p <- ggplot(d, aes(x = fitted, y = resid)) +
-         geom_point(color = UF_BLUE, size = 2.5, alpha = 0.7) +
-         geom_hline(yintercept = 0, color = UF_ORANGE, linetype = "dashed", linewidth = 1) +
-         theme_minimal(base_size = 12) +
-         labs(title = "Residuals vs Fitted", subtitle = note, x = "Fitted Values", y = "Residuals") +
-         theme(plot.title = element_text(hjust = 0.5, face = "bold"),
-               plot.subtitle = element_text(hjust = 0.5, size = 9, color = "#777"))
-    ggplotly(p) |> layout(margin = list(t = 90, b = 40, l = 55, r = 20))
+    ggplotly(reg_resid_gg(rv$model)) |> layout(margin = list(t = 90, b = 40, l = 55, r = 20))
   })
 
   output$dl_reg <- downloadHandler(
@@ -2087,6 +2379,24 @@ server <- function(input, output, session) {
       co <- as.data.frame(model_summary()$coefficients)
       co <- cbind(Term = rownames(co), co)
       write.csv(co, f, row.names = FALSE)
+    }
+  )
+
+  output$dl_exp_reg_fit <- downloadHandler(
+    filename = function() paste0("fitted_vs_actual_", Sys.Date(), ".", input$exp_fmt %||% "png"),
+    content  = function(f) {
+      req(rv$model)
+      render_plots_to_file(list(reg_fitted_gg(rv$model)), f, input$exp_fmt %||% "png",
+                           input$exp_w %||% 7, input$exp_h %||% 5.5, input$exp_dpi %||% 150)
+    }
+  )
+
+  output$dl_exp_reg_resid <- downloadHandler(
+    filename = function() paste0("residuals_vs_fitted_", Sys.Date(), ".", input$exp_fmt %||% "png"),
+    content  = function(f) {
+      req(rv$model)
+      render_plots_to_file(list(reg_resid_gg(rv$model)), f, input$exp_fmt %||% "png",
+                           input$exp_w %||% 7, input$exp_h %||% 5.5, input$exp_dpi %||% 150)
     }
   )
 }
