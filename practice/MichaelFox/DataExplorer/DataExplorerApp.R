@@ -320,6 +320,42 @@ clean_apply <- function(df, ids) {
 }
 
 # ----------------------------------------------------------
+# Variable type conversion — recast one column to a different
+# type. The classic case: a number that's really a category or
+# code (cyl = 4/6/8, a 1–5 rating) recast to a factor so it's
+# treated as discrete groups in charts, grouping, and regression
+# rather than as a quantity.
+# ----------------------------------------------------------
+
+# Target types offered in the UI (display label -> internal code).
+CONVERT_TYPES <- c(
+  "Factor (category)"      = "factor",
+  "Text"                   = "character",
+  "Number (decimal)"       = "numeric",
+  "Whole number (integer)" = "integer",
+  "TRUE / FALSE (logical)" = "logical",
+  "Date (ISO yyyy-mm-dd)"  = "date"
+)
+
+# Recast a vector to `to`. To a number, character/factor input is run through
+# num_from_text (strips $ , %) and a factor is routed via its LABELS, never the
+# hidden integer codes (the classic as.numeric(factor) trap). Values that can't
+# be parsed become NA; the caller reports how many.
+convert_column <- function(x, to) {
+  as_num <- function(z)
+    if (is.character(z) || is.factor(z)) num_from_text(as.character(z)) else as.numeric(z)
+  switch(to,
+    factor    = as.factor(x),
+    character = as.character(x),
+    numeric   = as_num(x),
+    integer   = as.integer(round(as_num(x))),
+    logical   = as.logical(if (is.factor(x)) as.character(x) else x),
+    date      = as.Date(as.character(x),
+                        tryFormats = c("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%d/%m/%Y")),
+    x)
+}
+
+# ----------------------------------------------------------
 # Data overview — a tidy per-column profile and a one-line
 # "at a glance" summary, both far more readable than summary().
 # ----------------------------------------------------------
@@ -374,6 +410,59 @@ data_glance <- function(df) {
     date     = sum(types == "date"),
     complete = sum(stats::complete.cases(df))
   )
+}
+
+# ----------------------------------------------------------
+# Grouped summary statistics — "summary stats by ___".
+# For each combination of the grouping column(s), report n,
+# mean, median, mode, min, max, and SD of each chosen numeric
+# variable (one row per group, per variable when several are
+# chosen). All stats ignore missing values.
+# ----------------------------------------------------------
+
+# NA-safe scalar reducers: return NA on an empty / too-small group instead of
+# warning or returning Inf/NaN (e.g. min() of an all-NA group).
+.s_mean <- function(x) { x <- x[!is.na(x)]; if (!length(x))   NA_real_ else mean(x) }
+.s_med  <- function(x) { x <- x[!is.na(x)]; if (!length(x))   NA_real_ else stats::median(x) }
+.s_min  <- function(x) { x <- x[!is.na(x)]; if (!length(x))   NA_real_ else min(x) }
+.s_max  <- function(x) { x <- x[!is.na(x)]; if (!length(x))   NA_real_ else max(x) }
+.s_sd   <- function(x) { x <- x[!is.na(x)]; if (length(x) < 2) NA_real_ else stats::sd(x) }
+# Mode = the most frequent value; NA when nothing repeats (e.g. continuous data
+# where every value is unique), which is the honest answer for such columns.
+.s_mode <- function(x) {
+  x <- x[!is.na(x)]
+  if (!length(x)) return(NA_real_)
+  tb <- table(x)
+  if (max(tb) == 1) return(NA_real_)
+  as.numeric(names(tb)[which.max(tb)])
+}
+
+# vars: numeric columns to summarize; groups: column(s) to group by.
+# Returns a tidy data frame [groups..., Variable, N, Mean, Median, Mode, Min,
+# Max, SD] or NULL if the inputs aren't usable.
+grouped_summary <- function(df, vars, groups, digits = 3) {
+  if (is.null(df) || !length(vars) || !length(groups)) return(NULL)
+  vars   <- intersect(vars, names(df))
+  groups <- intersect(groups, names(df))
+  if (!length(vars) || !length(groups)) return(NULL)
+  per_var <- lapply(vars, function(v) {
+    df |>
+      dplyr::group_by(dplyr::across(dplyr::all_of(groups))) |>
+      dplyr::summarise(
+        Variable = v,
+        N        = sum(!is.na(.data[[v]])),
+        Mean     = round(.s_mean(.data[[v]]), digits),
+        Median   = round(.s_med(.data[[v]]),  digits),
+        Mode     = round(.s_mode(.data[[v]]), digits),
+        Min      = round(.s_min(.data[[v]]),  digits),
+        Max      = round(.s_max(.data[[v]]),  digits),
+        SD       = round(.s_sd(.data[[v]]),   digits),
+        .groups  = "drop"
+      )
+  })
+  res <- as.data.frame(dplyr::bind_rows(per_var), check.names = FALSE)
+  res[, c(groups, "Variable", "N", "Mean", "Median", "Mode", "Min", "Max", "SD"),
+      drop = FALSE]
 }
 
 # ----------------------------------------------------------
@@ -1310,12 +1399,44 @@ function DEcopy(id, btn){
 }
 "
 
+# The IFAS logo is inlined as a base64 data URI rather than referenced from
+# www/, so it renders no matter how the app is launched. (Shiny's automatic
+# www/ static serving is unreliable for a single-file app like this, which is
+# why a plain src="IFAS-White.png" showed a broken image; and a relative
+# www/ path only resolves when the working directory happens to be the app
+# folder.) So we locate the file robustly — trying this script's own folder
+# first, then the working directory, then the repo-relative path — and encode
+# it. base64enc ships with Shiny, so it's always available. Falls back to NULL
+# (a text-only title) only if the file genuinely can't be found, so the app
+# never errors on startup.
+LOGO_URI <- local({
+  # Directory of this script, when discoverable (covers source() / Run App).
+  here <- NULL
+  for (i in seq_len(sys.nframe())) {
+    of <- sys.frame(i)$ofile
+    if (!is.null(of)) { here <- dirname(normalizePath(of, mustWork = FALSE)); break }
+  }
+  cands <- c(
+    if (!is.null(here)) file.path(here, "www", "IFAS-White.png"),
+    "www/IFAS-White.png",                                  # wd = the app folder
+    "practice/MichaelFox/DataExplorer/www/IFAS-White.png"  # wd = the repo root
+  )
+  f <- cands[file.exists(cands)]
+  if (length(f)) base64enc::dataURI(file = f[1], mime = "image/png") else NULL
+})
+
 # ============================================================
 # UI
 # ============================================================
 
 ui <- page_navbar(
-  title = "Data Explorer",
+  title = tags$span(
+    # White IFAS logo, inlined via LOGO_URI; shows on the dark-blue navbar.
+    if (!is.null(LOGO_URI))
+      tags$img(src = LOGO_URI, height = "51px", alt = "UF/IFAS",
+               style = "margin-right: 12px; vertical-align: middle;"),
+    tags$span("Data Explorer", style = "vertical-align: middle;")
+  ),
   theme = bs_theme(
     bootswatch  = "flatly",
     primary     = UF_BLUE,
@@ -1329,6 +1450,233 @@ ui <- page_navbar(
   # Glossary scroll like a normal page so their stacked cards (Data Health, the
   # regression-export panel) are never squeezed into a sliver.
   fillable = c("Visualize", "Regression"),
+
+  # ──────────────────────────────────────────────────────────
+  # TAB — About this tool (orientation; first so it's the landing page)
+  # ──────────────────────────────────────────────────────────
+  nav_panel(
+    title = "About",
+    layout_columns(
+      col_widths = c(6, 6),
+
+      tagList(
+        card(
+          card_header(icon("circle-info"), " What is Data Explorer?"),
+          tags$div(
+            class = "px-2",
+            tags$p("Data Explorer is a point-and-click tool for exploring, visualizing, and modeling tabular data — built for UF/IFAS students who want quick insight without writing R code."),
+            tags$p(class = "mb-1", tags$b("Use it to:")),
+            tags$ul(
+              tags$li("Import CSV, Excel, TSV, or RDS files — or load the built-in mtcars example."),
+              tags$li("Check and clean common data problems before you analyze."),
+              tags$li("Build and customize charts: scatter, line, bar, histogram, box plot, pie, and correlation heatmap."),
+              tags$li("Fit linear, multiple, and polynomial regression with a plain-English interpretation."),
+              tags$li("Export publication-ready plots, cleaned data, and reproducible R code.")
+            )
+          )
+        ),
+        card(
+          card_header(icon("route"), " How to use it"),
+          tags$ol(
+            class = "px-3",
+            tags$li(tags$b("Import Data:"), " upload a file (or load the example), review the Data Health panel, and recast a column's type under Change Variable Types if needed."),
+            tags$li(tags$b("Summarize:"), " get the count, mean, median, mode, min, max, and SD of a variable within each group (e.g. mean mpg by cylinder)."),
+            tags$li(tags$b("Visualize:"), " pick a chart type and variables, then refine with the style and advanced options. Copy the generated R code to reproduce the chart yourself."),
+            tags$li(tags$b("Regression:"), " choose a numeric response and one or more predictors, fit the model, and read the interpretation."),
+            tags$li(tags$b("Export:"), " download charts, the cleaned dataset, or the model results.")
+          ),
+          tags$p(class = "text-muted small px-3 mb-0",
+                 icon("book"), " New to a term? Open the ", tags$b("Glossary"),
+                 " at the bottom of this page for plain-English definitions of everything the app uses.")
+        )
+      ),
+
+      tagList(
+        card(
+          card_header(icon("circle-exclamation"), " What it can't do"),
+          tags$ul(
+            class = "px-3",
+            tags$li("Advanced models (logistic, mixed-effects, time-series, ANOVA) — it focuses on linear and polynomial regression."),
+            tags$li("Reshaping, joining, or merging multiple datasets — prepare your data before importing it."),
+            tags$li("Above ~1,000 rows it switches to static (non-interactive) charts to stay responsive; exports still use every row."),
+            tags$li("It won't make analysis decisions for you — it's a learning and exploration aid, not a replacement for sound statistical judgment.")
+          )
+        ),
+        card(
+          card_header(icon("lightbulb"), " Guidelines & limitations"),
+          tags$ul(
+            class = "px-3",
+            tags$li(tags$b("Clean first:"), " review the Data Health panel before you plot or model."),
+            tags$li(tags$b("Mind the basics:"), " correlation is not causation, and a significant p-value doesn't mean a large or important effect."),
+            tags$li(tags$b("Check assumptions:"), " use the Residuals vs Fitted plot to judge whether a linear model is appropriate."),
+            tags$li(tags$b("Educational use:"), " double-check results before relying on them in coursework or research.")
+          )
+        )
+      )
+    ),
+
+    # Glossary — folded off its own navbar tab into this collapsible panel to
+    # keep the navbar lean. Open it for plain-English definitions of every term
+    # the app uses (two columns of topic cards).
+    accordion(
+      open = FALSE,
+      accordion_panel(
+        tagList(icon("book"), " Glossary"),
+        value = "glossary",
+        layout_columns(
+          col_widths = c(6, 6),
+
+          tagList(
+            card(
+              card_header(icon("book"), " Regression & Model Terms"),
+              tags$dl(
+                class = "px-2",
+                tags$dt("Simple Linear Regression"),
+                tags$dd("Models the relationship between one predictor (X) and one response (Y) as a straight line: Y = a + b·X. Best when you expect a direct, linear relationship between two variables."),
+                tags$hr(),
+                tags$dt("Multiple Linear Regression"),
+                tags$dd("Extends simple linear regression to two or more predictors: Y = a + b₁X₁ + b₂X₂ + … Each coefficient tells you the effect of one predictor while holding the others constant."),
+                tags$hr(),
+                tags$dt("Polynomial Regression"),
+                tags$dd("Fits a curved (non-linear) relationship by adding powers of the predictor: Y = a + bX + cX² + … Use this when a scatter plot shows a clear curve rather than a straight line."),
+                tags$hr(),
+                tags$dt("R-squared (R²)"),
+                tags$dd("How much of the variation in Y is explained by the model (0–1). R² = 0.85 means the model accounts for 85% of the variability."),
+                tags$hr(),
+                tags$dt("Adjusted R²"),
+                tags$dd("Like R², but penalized for adding extra predictors that don't improve the fit. Better for comparing models with different numbers of variables."),
+                tags$hr(),
+                tags$dt("F-statistic & its p-value"),
+                tags$dd("Tests whether the model as a whole explains a significant amount of variance. A p-value < 0.05 means the overall model is statistically significant."),
+                tags$hr(),
+                tags$dt("Residuals"),
+                tags$dd("Observed value minus predicted value. Ideally scattered randomly around zero — patterns suggest the model is missing something."),
+                tags$hr(),
+                tags$dt("Confidence Interval (CI)"),
+                tags$dd("A 95% CI means: if we repeated the study 100 times, the true value would fall within this range 95 times. A CI for a coefficient that does not include zero indicates significance.")
+              )
+            ),
+            card(
+              card_header(icon("calculator"), " Summary Statistics"),
+              tags$dl(
+                class = "px-2",
+                tags$dt("Count (N)"),
+                tags$dd("How many non-missing values fall in a group. On the Summarize tab it tells you how many rows each group's statistics are based on — e.g. how many cars have 4 cylinders."),
+                tags$hr(),
+                tags$dt("Mean (average)"),
+                tags$dd("The sum of the values divided by how many there are. Sensitive to outliers — a few very large or small values pull it up or down."),
+                tags$hr(),
+                tags$dt("Median"),
+                tags$dd("The middle value when the data are sorted: half the values fall below it, half above. More robust to outliers than the mean."),
+                tags$hr(),
+                tags$dt("Mode"),
+                tags$dd("The most frequently occurring value. Most useful for categories or repeated values; when every value is unique (as with many continuous measurements) there is no mode, shown blank."),
+                tags$hr(),
+                tags$dt("Standard Deviation (SD)"),
+                tags$dd("A measure of spread — how far values typically sit from the mean. A small SD means values cluster tightly around the mean; a large SD means they're spread out. Needs at least two values."),
+                tags$hr(),
+                tags$dt("Minimum & Maximum"),
+                tags$dd("The smallest and largest values in a group. Together they show the range and can flag possible outliers or data-entry errors.")
+              )
+            )
+          ),
+
+          tagList(
+            card(
+              card_header(icon("book-open"), " Coefficient Table Terms"),
+              tags$dl(
+                class = "px-2",
+                tags$dt("Estimate (Coefficient)"),
+                tags$dd("The predicted change in Y for a one-unit increase in X, holding other variables constant. A coefficient of 3.2 for 'weight' means each unit increase in weight is associated with a 3.2-unit change in Y."),
+                tags$hr(),
+                tags$dt("Std. Error (Standard Error)"),
+                tags$dd("The uncertainty around the coefficient estimate. Smaller = more precise. Used to compute the t-value and confidence intervals."),
+                tags$hr(),
+                tags$dt("t-value"),
+                tags$dd("Coefficient divided by its standard error. A larger absolute value (generally > 2) suggests the predictor is statistically significant."),
+                tags$hr(),
+                tags$dt("p-value (Pr > |t|)"),
+                tags$dd("Probability of seeing this result by chance if the predictor had no real effect. p < 0.05 is the conventional threshold for statistical significance."),
+                tags$hr(),
+                tags$dt("Intercept"),
+                tags$dd("The predicted value of Y when all predictors equal zero. Often not directly meaningful on its own, but required for the model equation.")
+              )
+            ),
+            card(
+              card_header(icon("right-left"), " Data & Variable Types"),
+              tags$p(class = "px-2 mb-2",
+                     "Every column has a type, and the type controls how a column is summarized, plotted, and modeled. Use ",
+                     tags$b("Change Variable Types"), " on the Import Data tab to recast one."),
+              tags$dl(
+                class = "px-2",
+                tags$dt("Numeric / Integer"),
+                tags$dd("A quantity you can do arithmetic on — a decimal (numeric) or whole number (integer), such as weight or a count. Treated as a continuous scale in charts and as a single slope in regression."),
+                tags$hr(),
+                tags$dt("Factor (category)"),
+                tags$dd("A categorical variable with a fixed set of levels (e.g. low/medium/high, or cylinder counts 4/6/8 treated as groups). Convert a number to a factor when it's really a label or code: the app then gives each level its own color/bar, offers it for grouping and faceting, and dummy-codes it in regression instead of fitting one slope."),
+                tags$hr(),
+                tags$dt("Text (character)"),
+                tags$dd("Free-form text such as names, labels, or IDs. Treated as categorical when plotting, but with no inherent order."),
+                tags$hr(),
+                tags$dt("Logical (TRUE / FALSE)"),
+                tags$dd("A yes/no, true/false flag — useful for marking whether a condition holds."),
+                tags$hr(),
+                tags$dt("Date"),
+                tags$dd("A calendar date (ISO yyyy-mm-dd). Storing dates as a Date type lets charts place them correctly along a time axis instead of treating them as text.")
+              )
+            ),
+            card(
+              card_header(icon("circle-info"), " App Settings Explained"),
+              tags$dl(
+                class = "px-2",
+                tags$dt("First row is header"),
+                tags$dd("Check this if the first row of your CSV/text file contains column names (e.g. 'weight', 'mpg'). Uncheck if the file starts directly with data values."),
+                tags$hr(),
+                tags$dt("Column separator"),
+                tags$dd("The character used to split columns in your text file. CSV files use commas; TSV files use tabs. If your data looks jumbled after loading, try a different separator."),
+                tags$hr(),
+                tags$dt("Decimal point"),
+                tags$dd("The character used for decimal numbers. Most English-language files use a period (1.5); some European files use a comma (1,5). Choose the one that matches your file."),
+                tags$hr(),
+                tags$dt("Bar Aggregation"),
+                tags$dd("When a bar chart has a Y variable, repeated categories are combined with this function. 'Sum' totals the values, 'Mean' averages them, 'Median' takes the middle value. With no Y variable, bars simply count rows per category."),
+                tags$hr(),
+                tags$dt("Maximum bars / slices"),
+                tags$dd("Bar and pie charts keep this many of the largest categories and group the rest into a single 'Other' bar/slice, so a column with many categories stays readable. Defaults to a sensible cap; slide it up to show more categories (up to the number in your data) or down to simplify."),
+                tags$hr(),
+                tags$dt("Group Color Palette"),
+                tags$dd("The set of colors used when a Color / Group By variable is set. 'Automatic' chooses for you; 'Colorblind-safe' (Okabe–Ito) is the safest for accessibility; 'UF Brand', 'Viridis', 'ColorBrewer', and 'Greyscale' are alternatives. Palettes are recycled so they never run out of colors."),
+                tags$hr(),
+                tags$dt("Opacity"),
+                tags$dd("How see-through the points, bars, or boxes are (0.1 = nearly transparent, 1 = solid). Lowering it helps when many points or bars overlap."),
+                tags$hr(),
+                tags$dt("Jitter points"),
+                tags$dd("Adds a small random nudge to each scatter point so that points sharing the same value don't sit exactly on top of one another. Useful for dense or rounded data; it changes only the display, not the underlying values."),
+                tags$hr(),
+                tags$dt("Log Scale"),
+                tags$dd("Plots an axis on a base-10 logarithmic scale, so each step is ×10 (1, 10, 100, …). Helpful when values span several orders of magnitude or are heavily right-skewed. Only applies to continuous (numeric) axes and to positive values."),
+                tags$hr(),
+                tags$dt("Facet By (small multiples)"),
+                tags$dd("Splits one chart into a grid of small panels — one per category of the chosen variable — so you can compare groups side by side (e.g. one scatter per region). All panels share the same axes for easy comparison."),
+                tags$hr(),
+                tags$dt("Correlation Heatmap (Pearson vs Spearman)"),
+                tags$dd("A grid showing how strongly each pair of numeric columns moves together, from −1 (perfect inverse) through 0 (none) to +1 (perfect positive). 'Pearson' measures straight-line association; 'Spearman' ranks the values first, so it also captures monotonic but curved relationships and is less sensitive to outliers."),
+                tags$hr(),
+                tags$dt("Horizontal orientation"),
+                tags$dd("Flips a bar or box plot onto its side. This is the easiest fix when category labels are long or there are many of them and they overlap along the bottom."),
+                tags$hr(),
+                tags$dt("Show equation & R² (trendline label)"),
+                tags$dd("When a fitted line is overlaid on a scatter or line chart, this prints the fitted equation (or the model type) and its R² directly on the plot. R² ranges 0–1 and is the share of variation the fit explains."),
+                tags$hr(),
+                tags$dt("Resolution (DPI)"),
+                tags$dd("Dots per inch — controls the sharpness of exported images. 72–96 DPI is screen quality. 150 DPI is good for presentations. 300+ DPI is recommended for print or publication. Higher DPI means a larger file size.")
+              )
+            )
+          )
+        )
+      )
+    )
+  ),
 
   # ──────────────────────────────────────────────────────────
   # TAB 1 — Import Data
@@ -1366,6 +1714,12 @@ ui <- page_navbar(
         card_header(icon("broom"), " Data Health"),
         uiOutput("data_health_ui")
       ),
+      # Change Variable Types — sibling prep tool; recast a column's type
+      # (most often a numeric code to a factor).
+      card(
+        card_header(icon("right-left"), " Change Variable Types"),
+        uiOutput("convert_ui")
+      ),
       layout_columns(
         col_widths = c(8, 4),
         card(
@@ -1389,6 +1743,30 @@ ui <- page_navbar(
       card(
         card_header(icon("list"), " Column Profile"),
         DTOutput("tbl_profile")
+      )
+    )
+  ),
+
+  # ──────────────────────────────────────────────────────────
+  # TAB — Summarize (grouped summary statistics: "stats by ___")
+  # ──────────────────────────────────────────────────────────
+  nav_panel(
+    title = "Summarize",
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 300,
+        h5("Summary by Group"),
+        uiOutput("ui_smry_vars"),
+        uiOutput("ui_smry_groups"),
+        tags$div(class = "form-text mb-2",
+                 "Pick one or more numeric variables to summarize and one or more variables to group by. You'll get the count, mean, median, mode, min, max, and SD within each group."),
+        hr(),
+        downloadButton("dl_summary", "Download table (.csv)", class = "btn-success w-100")
+      ),
+      card(
+        card_header(icon("layer-group"), " Summary Statistics by Group"),
+        uiOutput("summary_caption"),
+        DTOutput("summary_tbl")
       )
     )
   ),
@@ -1557,118 +1935,6 @@ ui <- page_navbar(
         verbatimTextOutput("reg_export_preview")
       )
     )
-  ),
-
-  # ──────────────────────────────────────────────────────────
-  # TAB 5 — Glossary
-  # ──────────────────────────────────────────────────────────
-  nav_panel(
-    title = "Glossary",
-    layout_columns(
-      col_widths = c(6, 6),
-
-      tagList(
-        card(
-          card_header(icon("book"), " Regression & Model Terms"),
-          tags$dl(
-            class = "px-2",
-            tags$dt("Simple Linear Regression"),
-            tags$dd("Models the relationship between one predictor (X) and one response (Y) as a straight line: Y = a + b·X. Best when you expect a direct, linear relationship between two variables."),
-            tags$hr(),
-            tags$dt("Multiple Linear Regression"),
-            tags$dd("Extends simple linear regression to two or more predictors: Y = a + b₁X₁ + b₂X₂ + … Each coefficient tells you the effect of one predictor while holding the others constant."),
-            tags$hr(),
-            tags$dt("Polynomial Regression"),
-            tags$dd("Fits a curved (non-linear) relationship by adding powers of the predictor: Y = a + bX + cX² + … Use this when a scatter plot shows a clear curve rather than a straight line."),
-            tags$hr(),
-            tags$dt("R-squared (R²)"),
-            tags$dd("How much of the variation in Y is explained by the model (0–1). R² = 0.85 means the model accounts for 85% of the variability."),
-            tags$hr(),
-            tags$dt("Adjusted R²"),
-            tags$dd("Like R², but penalized for adding extra predictors that don't improve the fit. Better for comparing models with different numbers of variables."),
-            tags$hr(),
-            tags$dt("F-statistic & its p-value"),
-            tags$dd("Tests whether the model as a whole explains a significant amount of variance. A p-value < 0.05 means the overall model is statistically significant."),
-            tags$hr(),
-            tags$dt("Residuals"),
-            tags$dd("Observed value minus predicted value. Ideally scattered randomly around zero — patterns suggest the model is missing something."),
-            tags$hr(),
-            tags$dt("Confidence Interval (CI)"),
-            tags$dd("A 95% CI means: if we repeated the study 100 times, the true value would fall within this range 95 times. A CI for a coefficient that does not include zero indicates significance.")
-          )
-        )
-      ),
-
-      tagList(
-        card(
-          card_header(icon("book-open"), " Coefficient Table Terms"),
-          tags$dl(
-            class = "px-2",
-            tags$dt("Estimate (Coefficient)"),
-            tags$dd("The predicted change in Y for a one-unit increase in X, holding other variables constant. A coefficient of 3.2 for 'weight' means each unit increase in weight is associated with a 3.2-unit change in Y."),
-            tags$hr(),
-            tags$dt("Std. Error (Standard Error)"),
-            tags$dd("The uncertainty around the coefficient estimate. Smaller = more precise. Used to compute the t-value and confidence intervals."),
-            tags$hr(),
-            tags$dt("t-value"),
-            tags$dd("Coefficient divided by its standard error. A larger absolute value (generally > 2) suggests the predictor is statistically significant."),
-            tags$hr(),
-            tags$dt("p-value (Pr > |t|)"),
-            tags$dd("Probability of seeing this result by chance if the predictor had no real effect. p < 0.05 is the conventional threshold for statistical significance."),
-            tags$hr(),
-            tags$dt("Intercept"),
-            tags$dd("The predicted value of Y when all predictors equal zero. Often not directly meaningful on its own, but required for the model equation.")
-          )
-        ),
-        card(
-          card_header(icon("circle-info"), " App Settings Explained"),
-          tags$dl(
-            class = "px-2",
-            tags$dt("First row is header"),
-            tags$dd("Check this if the first row of your CSV/text file contains column names (e.g. 'weight', 'mpg'). Uncheck if the file starts directly with data values."),
-            tags$hr(),
-            tags$dt("Column separator"),
-            tags$dd("The character used to split columns in your text file. CSV files use commas; TSV files use tabs. If your data looks jumbled after loading, try a different separator."),
-            tags$hr(),
-            tags$dt("Decimal point"),
-            tags$dd("The character used for decimal numbers. Most English-language files use a period (1.5); some European files use a comma (1,5). Choose the one that matches your file."),
-            tags$hr(),
-            tags$dt("Bar Aggregation"),
-            tags$dd("When a bar chart has a Y variable, repeated categories are combined with this function. 'Sum' totals the values, 'Mean' averages them, 'Median' takes the middle value. With no Y variable, bars simply count rows per category."),
-            tags$hr(),
-            tags$dt("Maximum bars / slices"),
-            tags$dd("Bar and pie charts keep this many of the largest categories and group the rest into a single 'Other' bar/slice, so a column with many categories stays readable. Defaults to a sensible cap; slide it up to show more categories (up to the number in your data) or down to simplify."),
-            tags$hr(),
-            tags$dt("Group Color Palette"),
-            tags$dd("The set of colors used when a Color / Group By variable is set. 'Automatic' chooses for you; 'Colorblind-safe' (Okabe–Ito) is the safest for accessibility; 'UF Brand', 'Viridis', 'ColorBrewer', and 'Greyscale' are alternatives. Palettes are recycled so they never run out of colors."),
-            tags$hr(),
-            tags$dt("Opacity"),
-            tags$dd("How see-through the points, bars, or boxes are (0.1 = nearly transparent, 1 = solid). Lowering it helps when many points or bars overlap."),
-            tags$hr(),
-            tags$dt("Jitter points"),
-            tags$dd("Adds a small random nudge to each scatter point so that points sharing the same value don't sit exactly on top of one another. Useful for dense or rounded data; it changes only the display, not the underlying values."),
-            tags$hr(),
-            tags$dt("Log Scale"),
-            tags$dd("Plots an axis on a base-10 logarithmic scale, so each step is ×10 (1, 10, 100, …). Helpful when values span several orders of magnitude or are heavily right-skewed. Only applies to continuous (numeric) axes and to positive values."),
-            tags$hr(),
-            tags$dt("Facet By (small multiples)"),
-            tags$dd("Splits one chart into a grid of small panels — one per category of the chosen variable — so you can compare groups side by side (e.g. one scatter per region). All panels share the same axes for easy comparison."),
-            tags$hr(),
-            tags$dt("Correlation Heatmap (Pearson vs Spearman)"),
-            tags$dd("A grid showing how strongly each pair of numeric columns moves together, from −1 (perfect inverse) through 0 (none) to +1 (perfect positive). 'Pearson' measures straight-line association; 'Spearman' ranks the values first, so it also captures monotonic but curved relationships and is less sensitive to outliers."),
-            tags$hr(),
-            tags$dt("Horizontal orientation"),
-            tags$dd("Flips a bar or box plot onto its side. This is the easiest fix when category labels are long or there are many of them and they overlap along the bottom."),
-            tags$hr(),
-            tags$dt("Show equation & R² (trendline label)"),
-            tags$dd("When a fitted line is overlaid on a scatter or line chart, this prints the fitted equation (or the model type) and its R² directly on the plot. R² ranges 0–1 and is the share of variation the fit explains."),
-            tags$hr(),
-            tags$dt("Resolution (DPI)"),
-            tags$dd("Dots per inch — controls the sharpness of exported images. 72–96 DPI is screen quality. 150 DPI is good for presentations. 300+ DPI is recommended for print or publication. Higher DPI means a larger file size.")
-          )
-        )
-      )
-    )
   )
 )
 
@@ -1813,6 +2079,56 @@ server <- function(input, output, session) {
     showNotification("Reverted to the originally uploaded data.", type = "message")
   })
 
+  # ── Change variable types (e.g. a numeric code -> factor) ──
+
+  output$convert_ui <- renderUI({
+    if (is.null(rv$data))
+      return(helpText("Load a dataset to change column types."))
+    cols    <- names(rv$data)
+    types   <- vapply(rv$data, friendly_type, character(1))
+    choices <- setNames(cols, sprintf("%s  (currently %s)", cols, types))
+    tagList(
+      tags$p(class = "mb-2",
+        "Recast a column to a different type. The most common need: a number that's really a category or code (e.g. ",
+        tags$code("cyl"), " = 4/6/8) should be a ", tags$b("factor"),
+        " so it's treated as distinct groups in charts, grouping, and regression — not as a quantity."),
+      layout_columns(
+        col_widths = c(6, 6),
+        selectInput("ct_col",  "Column",     choices = choices),
+        selectInput("ct_type", "Convert to", choices = CONVERT_TYPES)
+      ),
+      actionButton("ct_apply", "Convert",
+                   class = "btn-primary btn-sm", icon = icon("right-left")),
+      tags$div(class = "form-text mt-2",
+        "Values that can't be converted become missing (NA) — you'll be told how many. Use Data Health's “Revert to original” above to undo all changes.")
+    )
+  })
+
+  observeEvent(input$ct_apply, {
+    req(rv$data, input$ct_col, input$ct_type)
+    col <- input$ct_col; to <- input$ct_type
+    if (!col %in% names(rv$data)) return()
+    x   <- rv$data[[col]]
+    cur <- friendly_type(x); if (cur == "text") cur <- "character"
+    if (identical(cur, to)) {
+      showNotification(sprintf("“%s” is already that type (%s).", col, cur),
+                       type = "warning"); return()
+    }
+    res <- tryCatch(convert_column(x, to), error = function(e) e)
+    if (inherits(res, "error")) {
+      showNotification(sprintf("Couldn't convert “%s” to %s: %s",
+                               col, to, conditionMessage(res)),
+                       type = "error", duration = 8); return()
+    }
+    new_na <- sum(is.na(res) & !is.na(x))   # values lost (became NA) in the cast
+    rv$data[[col]] <- res
+    msg <- sprintf("Converted “%s” to %s.", col, to)
+    if (new_na > 0)
+      msg <- paste0(msg, sprintf(" %d value%s couldn't be parsed and became NA.",
+                                 new_na, if (new_na == 1) "" else "s"))
+    showNotification(msg, type = if (new_na > 0) "warning" else "message", duration = 6)
+  })
+
   # ── Data preview ──────────────────────────────────────────
 
   output$tbl_preview <- renderDT({
@@ -1887,6 +2203,61 @@ server <- function(input, output, session) {
                      if (length(tn) == 1) "it" else "them",
                      if (length(tn) == 1) "it" else "them"))
   }
+
+  # ── Summarize: grouped summary statistics ("stats by ___") ─
+
+  # Numeric variables to summarize; defaults to the first so the table appears
+  # immediately on a fresh dataset.
+  output$ui_smry_vars <- renderUI({
+    req(rv$data)
+    nums <- cols_num()
+    if (!length(nums))
+      return(helpText("This dataset has no numeric columns to summarize."))
+    selectInput("smry_vars",
+      tags$span("Summarize (numeric)",
+                info_icon("The numeric variable(s) whose statistics you want within each group — e.g. mpg.")),
+      choices = nums, selected = nums[1], multiple = TRUE)
+  })
+
+  # Grouping variables: the same categorical / low-cardinality columns used for
+  # faceting (capped at 30 levels so an ID column can't make thousands of rows).
+  output$ui_smry_groups <- renderUI({
+    req(rv$data)
+    cats <- cols_cat()
+    if (!length(cats))
+      return(helpText("This dataset has no categorical or low-cardinality columns to group by."))
+    selectInput("smry_groups",
+      tags$span("Grouped by",
+                info_icon("The variable(s) that define the groups — e.g. cyl. With several, you get one row per combination.")),
+      choices = cats, selected = cats[1], multiple = TRUE)
+  })
+
+  summary_df <- reactive({
+    req(rv$data, input$smry_vars, input$smry_groups)
+    grouped_summary(rv$data, input$smry_vars, input$smry_groups)
+  })
+
+  output$summary_caption <- renderUI({
+    req(rv$data)
+    if (!length(input$smry_vars) || !length(input$smry_groups))
+      return(helpText("Choose at least one numeric variable and one grouping variable in the sidebar."))
+    tags$div(class = "form-text mb-2",
+             sprintf("Count, mean, median, mode, min, max, and SD of %s, grouped by %s. Mode is blank where a group has no repeated value.",
+                     paste(input$smry_vars, collapse = ", "),
+                     paste(input$smry_groups, collapse = " × ")))
+  })
+
+  output$summary_tbl <- renderDT({
+    d <- summary_df()
+    req(d)
+    datatable(d, rownames = FALSE, class = "compact stripe hover",
+              options = list(scrollX = TRUE, pageLength = 15, dom = "tip"))
+  })
+
+  output$dl_summary <- downloadHandler(
+    filename = function() paste0("group_summary_", Sys.Date(), ".csv"),
+    content  = function(f) { d <- summary_df(); req(d); write.csv(d, f, row.names = FALSE) }
+  )
 
   # ── Visualize: configuration accordion (1–4 plots) ────────
   #
