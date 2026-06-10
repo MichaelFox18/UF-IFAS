@@ -263,7 +263,10 @@ build_full_plot <- function(df, p) {
   if (!is.null(cv) && cv %in% names(df)) {
     if (is.numeric(df[[cv]]) && dplyr::n_distinct(df[[cv]]) <= 10)
       df[[cv]] <- as.factor(df[[cv]])
-    if (pt %in% c("histogram", "bar") && is.numeric(df[[cv]])) cv <- NULL
+    # bar / histogram / boxplot group by category; a still-continuous numeric
+    # group (>10 distinct) can't define boxes/bars, so drop it.
+    if (pt %in% c("histogram", "bar", "boxplot") && is.numeric(df[[cv]]))
+      cv <- NULL
   } else {
     cv <- NULL
   }
@@ -281,20 +284,30 @@ build_full_plot <- function(df, p) {
   ylab  <- if (!is.null(yv)) label_or(p$ylab %||% "", yv) else NULL
   subtitle <- NULL
 
-  smooth_layer <- function() {
+  # ycol lets the line chart fit the smooth on its aggregated ".value" column
+  # while the scatter fits on the raw y.
+  smooth_layer <- function(ycol = yv) {
     if (!isTRUE(p$reg_overlay)) return(NULL)
     meth <- p$reg_type %||% "lm"
     fml  <- if (meth == "poly")
               stats::as.formula(paste0("y ~ poly(x, ", p$reg_deg %||% 2, ")"))
             else y ~ x
-    geom_smooth(
-      mapping   = aes(x = .data[[xv]], y = .data[[yv]]),
-      method    = if (meth == "poly") "lm" else meth,
-      formula   = fml,
-      se        = isTRUE(p$reg_ci),
-      color     = p$reg_col %||% UF_ORANGE,
-      linewidth = 1.1
-    )
+    # With a color/group variable set, fit one line PER GROUP (coloured to match
+    # the points); otherwise a single fit in the chosen regression colour.
+    if (!is.null(cv)) {
+      geom_smooth(
+        mapping   = aes(x = .data[[xv]], y = .data[[ycol]], color = .data[[cv]]),
+        method    = if (meth == "poly") "lm" else meth,
+        formula   = fml, se = isTRUE(p$reg_ci), linewidth = 1.1
+      )
+    } else {
+      geom_smooth(
+        mapping   = aes(x = .data[[xv]], y = .data[[ycol]]),
+        method    = if (meth == "poly") "lm" else meth,
+        formula   = fml, se = isTRUE(p$reg_ci),
+        color     = p$reg_col %||% UF_ORANGE, linewidth = 1.1
+      )
+    }
   }
 
   p_obj <- NULL
@@ -311,19 +324,31 @@ build_full_plot <- function(df, p) {
     p_obj <- p_obj + smooth_layer()
 
   } else if (pt == "line") {
-    df <- df[order(df[[xv]]), , drop = FALSE]
+    # A line connects SUMMARY STATS: aggregate Y by X (within each group) with
+    # the chosen function, then connect. For a continuous X with one row each
+    # this is the identity (a plain line); for repeated/categorical X it
+    # connects the per-category mean/median/sum instead of scribbling raw rows.
+    grp  <- c(xv, cv)
+    aggf <- agg_fun(p$line_agg %||% "mean")
+    pdat <- df |>
+      dplyr::group_by(dplyr::across(dplyr::all_of(grp))) |>
+      dplyr::summarise(.value = aggf(.data[[yv]]), .groups = "drop")
+    pdat <- pdat[order(pdat[[xv]]), , drop = FALSE]
     aes_m <- if (!is.null(cv))
-               aes(x = .data[[xv]], y = .data[[yv]], color = .data[[cv]], group = .data[[cv]])
+               aes(x = .data[[xv]], y = .data[[".value"]],
+                   color = .data[[cv]], group = .data[[cv]])
              else
-               aes(x = .data[[xv]], y = .data[[yv]], group = 1)
-    p_obj <- ggplot(df, aes_m)
+               aes(x = .data[[xv]], y = .data[[".value"]], group = 1)
+    p_obj <- ggplot(pdat, aes_m)
     p_obj <- if (is.null(cv))
                p_obj + geom_line(linewidth = size * 0.4, color = col) +
                        geom_point(size = size * 0.7,     color = col)
              else
                p_obj + geom_line(linewidth = size * 0.4) +
                        geom_point(size = size * 0.7)
-    p_obj <- p_obj + smooth_layer()
+    p_obj <- p_obj + smooth_layer(".value")
+    ylab <- label_or(p$ylab %||% "",
+                     paste0(tools::toTitleCase(p$line_agg %||% "mean"), " of ", yv))
 
   } else if (pt == "bar") {
     has_y <- !is.null(yv)
@@ -346,7 +371,24 @@ build_full_plot <- function(df, p) {
       p_obj <- if (is.null(cv))
                  p_obj + geom_col(fill = col, width = bw, alpha = alpha)
                else
-                 p_obj + geom_col(width = bw, alpha = alpha, position = "dodge")
+                 p_obj + geom_col(width = bw, alpha = alpha,
+                                  position = position_dodge(width = 0.9))
+      # Optional connecting line over the bar tops (supervisor: "connect summary
+      # stats"). Matches the bars' dodge so grouped lines sit on their bars.
+      if (isTRUE(p$bar_line)) {
+        if (is.null(cv)) {
+          p_obj <- p_obj +
+            geom_line(aes(group = 1), linewidth = 0.9, color = "#333333") +
+            geom_point(size = 1.8, color = "#333333")
+        } else {
+          dpos <- position_dodge(width = 0.9)
+          p_obj <- p_obj +
+            geom_line(aes(group = .data[[cv]]), position = dpos,
+                      linewidth = 0.9, color = "#333333") +
+            geom_point(aes(group = .data[[cv]]), position = dpos,
+                       size = 1.8, color = "#333333")
+        }
+      }
       ylab <- label_or(p$ylab %||% "",
                        paste0(tools::toTitleCase(p$bar_agg %||% "sum"), " of ", yv))
     } else {
@@ -371,6 +413,10 @@ build_full_plot <- function(df, p) {
     ylab <- "Count"
 
   } else if (pt == "boxplot") {
+    # A boxplot's X is categorical: one box per distinct X. A numeric X left as
+    # continuous draws a single mis-sized box (the "cut-off" look), so coerce it
+    # to a factor — each value gets its own box.
+    if (is.numeric(df[[xv]])) df[[xv]] <- as.factor(df[[xv]])
     aes_m <- if (!is.null(cv)) aes(x = .data[[xv]], y = .data[[yv]], fill = .data[[cv]])
              else               aes(x = .data[[xv]], y = .data[[yv]])
     p_obj <- ggplot(df, aes_m)
@@ -378,8 +424,12 @@ build_full_plot <- function(df, p) {
                p_obj + geom_boxplot(fill = col, alpha = alpha,
                                     outlier.size = size * 0.7, outlier.alpha = 0.6)
              else
-               p_obj + geom_boxplot(alpha = alpha,
-                                    outlier.size = size * 0.7, outlier.alpha = 0.6)
+               # dodge2 so a grouped boxplot draws side-by-side boxes per x
+               # category; preserve="single" keeps equal widths when a group is
+               # missing at some x.
+               p_obj + geom_boxplot(alpha = alpha, outlier.size = size * 0.7,
+                                    outlier.alpha = 0.6,
+                                    position = position_dodge2(preserve = "single"))
 
   } else if (pt == "pie") {
     use_count <- is.null(yv)
@@ -439,13 +489,19 @@ build_full_plot <- function(df, p) {
                                 color = "#333333", fontface = "italic")
   }
 
+  # Axis transform: "none", or <log|sqrt><x|y|both>. Applied only to continuous
+  # axes (x only where x is numeric).
   ls <- p$logscale %||% "none"
-  if (ls %in% c("x", "both") && is.numeric(df[[xv]]) &&
-      pt %in% c("scatter", "line", "histogram"))
-    p_obj <- p_obj + scale_x_log10()
-  if (ls %in% c("y", "both") &&
-      pt %in% c("scatter", "line", "bar", "histogram", "boxplot"))
-    p_obj <- p_obj + scale_y_log10()
+  if (ls != "none") {
+    is_sqrt <- startsWith(ls, "sqrt")
+    axis    <- sub("^(log|sqrt)", "", ls)
+    if (axis %in% c("x", "both") && is.numeric(df[[xv]]) &&
+        pt %in% c("scatter", "line", "histogram"))
+      p_obj <- p_obj + (if (is_sqrt) scale_x_sqrt() else scale_x_log10())
+    if (axis %in% c("y", "both") &&
+        pt %in% c("scatter", "line", "bar", "histogram", "boxplot"))
+      p_obj <- p_obj + (if (is_sqrt) scale_y_sqrt() else scale_y_log10())
+  }
 
   if (!is.null(facet_v) && dplyr::n_distinct(df[[facet_v]]) <= 30)
     p_obj <- p_obj + facet_wrap(vars(.data[[facet_v]]))
@@ -538,8 +594,10 @@ generate_code <- function(df, p) {
     cv <- NULL
   }
 
-  if (pt == "line")
-    pre <- c(pre, sprintf('df <- df[order(df[["%s"]]), ]  # lines connect points in row order', xv))
+  # Boxplot X is categorical — coerce a numeric X so each value gets its own box.
+  if (pt == "boxplot" && is.numeric(df[[xv]]))
+    pre <- c(pre, sprintf('df[["%s"]] <- as.factor(df[["%s"]])', xv, xv))
+
   barmax <- p$cat_limit %||% BAR_MAX
   if (pt == "bar" && is_discrete_col(df[[xv]]) && dplyr::n_distinct(df[[xv]]) > barmax)
     pre <- c(pre, sprintf("# The app showed only the top %d categories of '%s'; this code plots them all.",
@@ -550,7 +608,7 @@ generate_code <- function(df, p) {
   size  <- p$size %||% 2
   col   <- p$color_hex %||% UF_BLUE
   bins  <- p$bins %||% 30
-  agg   <- p$bar_agg %||% "sum"
+  agg   <- if (pt == "line") p$line_agg %||% "mean" else p$bar_agg %||% "sum"
   alpha <- round(p$alpha %||% 0.8, 2)
   theme_str <- switch(p$theme %||% "minimal",
     minimal = "theme_minimal()", classic = "theme_classic()",
@@ -562,7 +620,7 @@ generate_code <- function(df, p) {
   ylab  <- if (!is.null(yv)) label_or(p$ylab %||% "", yv) else NULL
 
   uses_color  <- pt %in% c("scatter", "line")
-  needs_dplyr <- (pt == "bar" && !is.null(yv)) || pt == "pie"
+  needs_dplyr <- (pt %in% c("bar", "line") && !is.null(yv)) || pt == "pie"
 
   scale_line <- NULL
   if (!is.null(cv))
@@ -577,12 +635,16 @@ generate_code <- function(df, p) {
     meth <- p$reg_type %||% "lm"
     se   <- if (isTRUE(p$reg_ci)) "TRUE" else "FALSE"
     rcol <- p$reg_col %||% UF_ORANGE
-    smooth_line <- if (meth == "poly")
-      sprintf('geom_smooth(method = "lm", formula = y ~ poly(x, %s), se = %s, color = %s, linewidth = 1.1)',
-              p$reg_deg %||% 2, se, qq(rcol))
+    frm  <- if (meth == "poly")
+              sprintf('method = "lm", formula = y ~ poly(x, %s)', p$reg_deg %||% 2)
+            else sprintf('method = "%s", formula = y ~ x', meth)
+    # Grouped fit (one line per group) when a colour var is set; else single fit.
+    smooth_line <- if (!is.null(cv))
+      sprintf('geom_smooth(aes(color = %s), %s, se = %s, linewidth = 1.1)',
+              bq(cv), frm, se)
     else
-      sprintf('geom_smooth(method = "%s", formula = y ~ x, se = %s, color = %s, linewidth = 1.1)',
-              meth, se, qq(rcol))
+      sprintf('geom_smooth(%s, se = %s, color = %s, linewidth = 1.1)',
+              frm, se, qq(rcol))
   }
 
   labs_parts <- character(0)
@@ -617,19 +679,21 @@ generate_code <- function(df, p) {
   }
 
   aes_inner <- sprintf("x = %s", bq(xv))
-  if (pt == "bar" && !is.null(yv)) aes_inner <- paste0(aes_inner, ", y = .value")
-  else if (!is.null(yv))           aes_inner <- paste0(aes_inner, sprintf(", y = %s", bq(yv)))
+  if (pt %in% c("bar", "line") && !is.null(yv)) aes_inner <- paste0(aes_inner, ", y = .value")
+  else if (!is.null(yv))                        aes_inner <- paste0(aes_inner, sprintf(", y = %s", bq(yv)))
   if (!is.null(cv)) aes_inner <- paste0(
     aes_inner, sprintf(", %s = %s", if (uses_color) "color" else "fill", bq(cv)))
   if (pt == "line" && is.null(cv)) aes_inner <- paste0(aes_inner, ", group = 1")
   if (pt == "line" && !is.null(cv)) aes_inner <- paste0(aes_inner, sprintf(", group = %s", bq(cv)))
 
-  if (pt == "bar" && !is.null(yv)) {
+  if (pt %in% c("bar", "line") && !is.null(yv)) {
     grp_cols <- paste(c(bq(xv), if (!is.null(cv)) bq(cv)), collapse = ", ")
     aggfn <- switch(agg, mean = "mean", median = "median", "sum")
     pre <- c(pre, sprintf(
       'plot_df <- dplyr::summarise(dplyr::group_by(df, %s), .value = %s(%s, na.rm = TRUE), .groups = "drop")',
       grp_cols, aggfn, bq(yv)))
+    if (pt == "line")
+      pre <- c(pre, sprintf('plot_df <- plot_df[order(plot_df[["%s"]]), ]', xv))
     data_obj <- "plot_df"
     ylab <- label_or(p$ylab %||% "", paste0(tools::toTitleCase(agg), " of ", yv))
   }
@@ -677,6 +741,16 @@ generate_code <- function(df, p) {
 
   lines <- c(sprintf("ggplot(%s, aes(%s))", data_obj, aes_inner))
   lines <- c(lines, geom_lines)
+  # Optional connecting line over the bar tops.
+  if (pt == "bar" && !is.null(yv) && isTRUE(p$bar_line)) {
+    if (is.null(cv))
+      lines <- c(lines, 'geom_line(aes(group = 1), linewidth = 0.9, color = "#333333")',
+                        'geom_point(size = 1.8, color = "#333333")')
+    else
+      lines <- c(lines,
+        sprintf('geom_line(aes(group = %s), position = position_dodge(width = 0.9), linewidth = 0.9, color = "#333333")', bq(cv)),
+        sprintf('geom_point(aes(group = %s), position = position_dodge(width = 0.9), size = 1.8, color = "#333333")', bq(cv)))
+  }
   if (!is.null(smooth_line)) lines <- c(lines, smooth_line)
   if (!is.null(scale_line))  lines <- c(lines, scale_line)
 
@@ -690,12 +764,16 @@ generate_code <- function(df, p) {
   }
 
   ls <- p$logscale %||% "none"
-  if (ls %in% c("x", "both") && is.numeric(df[[xv]]) &&
-      pt %in% c("scatter", "line", "histogram"))
-    lines <- c(lines, "scale_x_log10()")
-  if (ls %in% c("y", "both") &&
-      pt %in% c("scatter", "line", "bar", "histogram", "boxplot"))
-    lines <- c(lines, "scale_y_log10()")
+  if (ls != "none") {
+    is_sqrt <- startsWith(ls, "sqrt")
+    axis    <- sub("^(log|sqrt)", "", ls)
+    if (axis %in% c("x", "both") && is.numeric(df[[xv]]) &&
+        pt %in% c("scatter", "line", "histogram"))
+      lines <- c(lines, if (is_sqrt) "scale_x_sqrt()" else "scale_x_log10()")
+    if (axis %in% c("y", "both") &&
+        pt %in% c("scatter", "line", "bar", "histogram", "boxplot"))
+      lines <- c(lines, if (is_sqrt) "scale_y_sqrt()" else "scale_y_log10()")
+  }
 
   if (!is.null(facet_v)) lines <- c(lines, sprintf("facet_wrap(vars(%s))", bq(facet_v)))
   if (isTRUE(p$flip))    lines <- c(lines, "coord_flip()")

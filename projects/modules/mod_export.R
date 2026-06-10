@@ -34,10 +34,11 @@ exportUI <- function(id) {
       uiOutput(ns("model_ui"))     # filled only when a model reactive is given
     ),
     card(
-      card_header(icon("file-export"), " What will be exported"),
+      card_header(icon("file-export"), " Data to export"),
       textOutput(ns("caption")),
       DT::DTOutput(ns("preview"))
-    )
+    ),
+    uiOutput(ns("charts_preview_ui"))   # filled only when a plots reactive is given
   )
 }
 
@@ -80,6 +81,18 @@ exportServer <- function(id, data_in, plots = NULL, model = NULL) {
 
     # ── Optional: export charts (from mod_visualize) ──────────
     if (!is.null(plots)) {
+      # Preview the exact grid that will be exported.
+      output$charts_preview_ui <- renderUI({
+        card(card_header(icon("chart-line"), " Chart preview"),
+             plotOutput(ns("charts_preview"), height = "440px"))
+      })
+      output$charts_preview <- renderPlot({
+        pl <- plots()
+        validate(need(length(pl) >= 1L,
+                      "Configure at least one chart on the Visualize tab."))
+        draw_plot_grid(pl)
+      }, bg = "white")
+
       output$charts_ui <- renderUI({
         tagList(
           hr(), h6("Export charts"),

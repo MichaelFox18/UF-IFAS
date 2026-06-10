@@ -12,6 +12,8 @@
 .s_min  <- function(x) { x <- x[!is.na(x)]; if (!length(x))   NA_real_ else min(x) }
 .s_max  <- function(x) { x <- x[!is.na(x)]; if (!length(x))   NA_real_ else max(x) }
 .s_sd   <- function(x) { x <- x[!is.na(x)]; if (length(x) < 2) NA_real_ else stats::sd(x) }
+.s_se   <- function(x) { x <- x[!is.na(x)]; if (length(x) < 2) NA_real_ else stats::sd(x) / sqrt(length(x)) }
+.s_iqr  <- function(x) { x <- x[!is.na(x)]; if (!length(x))    NA_real_ else stats::IQR(x) }
 
 # Mode = the most frequent value; NA when nothing repeats (e.g. continuous data
 # where every value is unique), which is the honest answer for such columns.
@@ -26,15 +28,16 @@
 #' Grouped summary statistics — "summary stats by ___".
 #'
 #' For each combination of the grouping column(s), report N, mean, median,
-#' mode, min, max, and SD of each chosen numeric variable (one row per group,
-#' per variable when several are chosen). All stats ignore missing values.
+#' mode, min, max, SD, SE (= SD/√N), and IQR of each chosen numeric variable
+#' (one row per group, per variable when several are chosen). All stats ignore
+#' missing values.
 #'
 #' @param df A data frame.
 #' @param vars Character vector of numeric columns to summarize.
 #' @param groups Character vector of columns to group by.
 #' @param digits Rounding for the reported statistics.
 #' @return A tidy data frame [groups..., Variable, N, Mean, Median, Mode, Min,
-#'   Max, SD], or NULL if the inputs aren't usable.
+#'   Max, SD, SE, IQR], or NULL if the inputs aren't usable.
 grouped_summary <- function(df, vars, groups, digits = 3) {
   if (is.null(df) || !length(vars) || !length(groups)) return(NULL)
   vars   <- intersect(vars, names(df))
@@ -52,12 +55,54 @@ grouped_summary <- function(df, vars, groups, digits = 3) {
         Min      = round(.s_min(.data[[v]]),  digits),
         Max      = round(.s_max(.data[[v]]),  digits),
         SD       = round(.s_sd(.data[[v]]),   digits),
+        SE       = round(.s_se(.data[[v]]),   digits),
+        IQR      = round(.s_iqr(.data[[v]]),  digits),
         .groups  = "drop"
       )
   })
   res <- as.data.frame(dplyr::bind_rows(per_var), check.names = FALSE)
-  res[, c(groups, "Variable", "N", "Mean", "Median", "Mode", "Min", "Max", "SD"),
-      drop = FALSE]
+  res[, c(groups, "Variable", "N", "Mean", "Median", "Mode", "Min", "Max",
+          "SD", "SE", "IQR"), drop = FALSE]
+}
+
+#' Proportions of a categorical outcome within each group, with exact CIs.
+#'
+#' For each group, count how many rows fall in each level of `outcome`, then
+#' report the percentage and an exact (Clopper–Pearson) binomial confidence
+#' interval via binom::binom.confint(). The categorical analogue of
+#' grouped_summary() — "percent of counts by group".
+#'
+#' @param df A data frame.
+#' @param outcome Name of the categorical outcome column (first is used).
+#' @param groups Character vector of columns to group by.
+#' @param conf_level Confidence level for the interval (default 0.95).
+#' @param digits Rounding for the reported percentages.
+#' @return A tidy data frame [groups..., Level, N, Total, Percent, CI_low,
+#'   CI_high] (percentages 0–100), or NULL if the inputs aren't usable.
+proportions_summary <- function(df, outcome, groups, conf_level = 0.95,
+                                digits = 1) {
+  if (is.null(df) || !length(outcome) || !length(groups)) return(NULL)
+  outcome <- outcome[[1]]
+  if (!all(c(outcome, groups) %in% names(df))) return(NULL)
+  keep <- !is.na(df[[outcome]])
+  df   <- df[keep, , drop = FALSE]
+  if (!nrow(df)) return(NULL)
+
+  counts <- dplyr::count(df, dplyr::across(dplyr::all_of(c(groups, outcome))),
+                         name = "N")
+  totals <- counts |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(groups))) |>
+    dplyr::summarise(Total = sum(.data[["N"]]), .groups = "drop")
+  out <- dplyr::left_join(counts, totals, by = groups)
+
+  ci <- binom::binom.confint(out$N, out$Total, conf.level = conf_level,
+                             methods = "exact")
+  out$Percent <- round(100 * out$N / out$Total, digits)
+  out$CI_low  <- round(100 * ci$lower, digits)
+  out$CI_high <- round(100 * ci$upper, digits)
+  names(out)[names(out) == outcome] <- "Level"
+  as.data.frame(out)[, c(groups, "Level", "N", "Total", "Percent",
+                         "CI_low", "CI_high"), drop = FALSE]
 }
 
 #' A plain-English column type for display ("numeric", "factor", "date", …).

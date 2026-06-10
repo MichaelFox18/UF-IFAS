@@ -48,7 +48,20 @@ plot_slot_panel <- function(ns, i) {
                   tagList("Bar aggregation", info_tip(
                     "How to combine Y values within each category. Ignored when ",
                     "no Y variable is set (then bars show counts).")),
-                  choices = c("Sum" = "sum", "Mean" = "mean", "Median" = "median"))
+                  choices = c("Sum" = "sum", "Mean" = "mean", "Median" = "median")),
+      checkboxInput(pid("_barline"),
+                    tagList("Overlay a connecting line", info_tip(
+                      "Draws a line through the bar tops to connect the summary ",
+                      "stats (needs a Y variable).")),
+                    FALSE)
+    ),
+    conditionalPanel(
+      cond("_type", "== 'line'"),
+      selectInput(pid("_lineagg"),
+                  tagList("Connect (per X)", info_tip(
+                    "A line connects one summary value per X category: the mean, ",
+                    "median, or sum of Y. For a continuous X it's just the line.")),
+                  choices = c("Mean" = "mean", "Median" = "median", "Sum" = "sum"))
     ),
     conditionalPanel(
       cond("_type", "== 'histogram'"),
@@ -127,11 +140,14 @@ plot_slot_panel <- function(ns, i) {
         conditionalPanel(
           sprintf("%s && %s", cond("_type", "!= 'pie'"), cond("_type", "!= 'heatmap'")),
           selectInput(pid("_logscale"),
-                      tagList("Log scale", info_tip(
-                        "Log10-transforms an axis — useful for skewed or ",
-                        "wide-ranging values. Continuous axes only.")),
-                      choices = c("None" = "none", "X axis" = "x", "Y axis" = "y",
-                                  "Both" = "both"))
+                      tagList("Axis scale", info_tip(
+                        "Transform an axis — log10 for skewed/wide-ranging ",
+                        "values, sqrt for counts. Continuous axes only.")),
+                      choices = c("None" = "none",
+                                  "Log10 — X" = "logx", "Log10 — Y" = "logy",
+                                  "Log10 — both" = "logboth",
+                                  "Sqrt — X" = "sqrtx", "Sqrt — Y" = "sqrty",
+                                  "Sqrt — both" = "sqrtboth"))
         ),
         uiOutput(oid("_facet")),
         selectInput(pid("_legendpos"), "Legend position",
@@ -310,6 +326,8 @@ visualizeServer <- function(id, data_in) {
         size        = input[[paste0("mp", i, "_size")]],
         bins        = input[[paste0("mp", i, "_bins")]],
         bar_agg     = input[[paste0("mp", i, "_baragg")]],
+        bar_line    = isTRUE(input[[paste0("mp", i, "_barline")]]),
+        line_agg    = input[[paste0("mp", i, "_lineagg")]] %||% "mean",
         cat_limit   = input[[paste0("mp", i, "_catlimitv")]],
         corr_method = input[[paste0("mp", i, "_corrmethod")]] %||% "pearson",
         corr_label  = isTRUE(input[[paste0("mp", i, "_corrlabel")]]),
@@ -425,6 +443,22 @@ visualizeServer <- function(id, data_in) {
           generate_code(data_in(), pr)
         })
       })
+    }
+
+    # Build the list of currently-configured ggplots (skips slots without a
+    # usable X; errors become NULL rather than breaking the whole list).
+    current_plots <- function() {
+      df <- data_in()
+      if (!is.data.frame(df)) return(list())
+      n   <- as.integer(input$n_plots %||% 1)
+      out <- list()
+      for (i in seq_len(n)) {
+        pr <- slot_params(i)
+        if (!identical(pr$type, "heatmap") && (is.null(pr$x) || !nzchar(pr$x))) next
+        pl <- tryCatch(build_full_plot(df, pr), error = function(e) NULL)
+        if (!is.null(pl)) out[[length(out) + 1L]] <- pl
+      }
+      out
     }
 
     # Return the current plot list (ggplots) so a downstream stage like Export

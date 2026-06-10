@@ -30,7 +30,13 @@ uf_theme <- function() {
     secondary   = UF_ORANGE,
     font_scale  = 0.95,
     "navbar-bg" = UF_BLUE
-  )
+  ) |>
+    bslib::bs_add_rules(
+      # Keep Shiny's "no data yet" validation messages on one line. Otherwise,
+      # while a tab's width is still settling during a switch, the message
+      # briefly wraps one letter per row before reflowing.
+      ".shiny-output-error-validation { white-space: nowrap; }"
+    )
 }
 
 #' Locate the white IFAS logo and return it as an inlined base64 data URI.

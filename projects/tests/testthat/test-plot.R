@@ -41,6 +41,47 @@ test_that("generate_code backticks non-syntactic column names", {
   expect_true(grepl("`my x`", code, fixed = TRUE))
 })
 
+test_that("generate_code emits a sqrt scale", {
+  df   <- data.frame(x = 1:10, y = 1:10)
+  code <- generate_code(df, list(type = "scatter", x = "x", y = "y",
+                                 logscale = "sqrty"))
+  expect_true(grepl("scale_y_sqrt()", code, fixed = TRUE))
+  expect_false(grepl("scale_x", code))
+  expect_silent(parse(text = code))
+})
+
+test_that("generate_code fits the regression overlay per group", {
+  df   <- data.frame(x = 1:10, y = 1:10, g = rep(c("a", "b"), 5))
+  code <- generate_code(df, list(type = "scatter", x = "x", y = "y", color = "g",
+                                 reg_overlay = TRUE, reg_type = "lm"))
+  expect_true(grepl("geom_smooth(aes(color = g)", code, fixed = TRUE))
+  expect_silent(parse(text = code))
+})
+
+test_that("generate_code aggregates the line chart by X", {
+  df   <- data.frame(g = rep(c("a", "b"), each = 3), y = 1:6)
+  code <- generate_code(df, list(type = "line", x = "g", y = "y",
+                                 line_agg = "mean"))
+  expect_true(grepl("dplyr::summarise", code))
+  expect_true(grepl("geom_line", code))
+  expect_silent(parse(text = code))
+})
+
+test_that("generate_code coerces a numeric boxplot X to a factor", {
+  code <- generate_code(mtcars, list(type = "boxplot", x = "cyl", y = "qsec"))
+  expect_true(grepl('as.factor(df[["cyl"]])', code, fixed = TRUE))
+  expect_silent(parse(text = code))
+})
+
+test_that("generate_code adds the bar connecting-line overlay", {
+  df   <- data.frame(g = c("a", "b", "c"), y = c(1, 2, 3))
+  code <- generate_code(df, list(type = "bar", x = "g", y = "y",
+                                 bar_agg = "sum", bar_line = TRUE))
+  expect_true(grepl("geom_col", code))
+  expect_true(grepl("geom_line", code))
+  expect_silent(parse(text = code))
+})
+
 # ---- small helpers -----------------------------------------------------------
 
 test_that("needs_x_rotation triggers for many/long discrete labels", {

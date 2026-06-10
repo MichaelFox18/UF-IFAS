@@ -9,7 +9,9 @@ test_that("grouped_summary returns one row per group with the right stats", {
   expect_equal(out$N, c(2L, 1L))
   expect_equal(out$Mean, c(2, 10))
   expect_true(all(c("g", "Variable", "N", "Mean", "Median", "Mode", "Min",
-                    "Max", "SD") %in% names(out)))
+                    "Max", "SD", "SE", "IQR") %in% names(out)))
+  expect_equal(out$SE[out$g == "a"], 1)        # sd(1,3)/sqrt(2) = 1
+  expect_true(is.na(out$SE[out$g == "b"]))     # SE undefined for n = 1
 })
 
 test_that("grouped_summary returns NULL when inputs are unusable", {
@@ -52,4 +54,25 @@ test_that("data_glance counts rows, columns, and complete cases", {
   expect_equal(g$n, 2L)
   expect_equal(g$m, 2L)
   expect_equal(g$complete, 1L)        # one row has an NA
+})
+
+test_that("proportions_summary gives percents and exact CIs by group", {
+  skip_if_not_installed("binom")
+  df <- data.frame(
+    g       = rep(c("A", "B"), each = 10),
+    outcome = c(rep("yes", 6), rep("no", 4),     # A: 6/10 yes
+                rep("yes", 5), rep("no", 5))      # B: 5/10 yes
+  )
+  out <- proportions_summary(df, "outcome", "g")
+  expect_true(all(c("g", "Level", "N", "Total", "Percent", "CI_low",
+                    "CI_high") %in% names(out)))
+  ay <- out[out$g == "A" & out$Level == "yes", ]
+  expect_equal(ay$N, 6L)
+  expect_equal(ay$Total, 10L)
+  expect_equal(ay$Percent, 60)
+  expect_true(ay$CI_low < 60 && ay$CI_high > 60)   # exact CI brackets 60%
+})
+
+test_that("proportions_summary returns NULL on unusable input", {
+  expect_null(proportions_summary(data.frame(x = 1), "x", character(0)))
 })
