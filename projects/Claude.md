@@ -18,10 +18,10 @@ Why modular: the existing `DataExplorerApp.R` is ~2,776 lines in a single namesp
 
 The kit is built and the original roadmap is done. What exists:
 
-- **Three runnable apps** (`apps/`): `data_explorer` (the full pipeline: About → Import → Reshape → Summarize → Visualize → Regression → Export), `reshape_tool` (import → reshape → export), and `combine_tool` (import two tables → combine → export).
-- **Seven modules** (`modules/`): `mod_import` (upload/clean/recast + Data Health + profile), `mod_reshape` (stack/split/transpose/sort/subset), `mod_summarize`, `mod_visualize` (1–4 plots, 7 chart types, code export), `mod_regression`, `mod_export` (data + charts + model), `mod_combine` (concatenate/join/update/compare).
-- **Nine pure helper files** (`R/`), all unit-tested — see layout below.
-- **A testthat suite** (`tests/testthat/`, ~115 expectations) covering every `do_*`/helper. Modules are verified with `shiny::testServer` smoke checks (not committed; run ad hoc).
+- **Three runnable apps** (`apps/`): `data_explorer` (the full pipeline: About → Import → Reshape → Summarize → Visualize → Compare Groups → Regression → Export), `reshape_tool` (import → reshape → export), and `combine_tool` (import two tables → combine → export).
+- **Eight modules** (`modules/`): `mod_import` (upload/clean/recast + Data Health + **row filter** + profile), `mod_reshape` (stack/split/transpose/sort/subset), `mod_summarize`, `mod_visualize` (1–4 plots, 7 chart types, code export), `mod_compare` (t-test/ANOVA/Wilcoxon/Kruskal + chi-square, assumptions, effect sizes), `mod_regression`, `mod_export` (data + charts + summary + model), `mod_combine` (concatenate/join/update/compare).
+- **Eleven pure helper files** (`R/`), all unit-tested — see layout below.
+- **A testthat suite** (`tests/testthat/`, ~190 expectations) covering every `do_*`/helper. Modules are verified with `shiny::testServer` smoke checks (not committed; run ad hoc).
 
 To extend it, follow the same path every existing feature took: **pure helper + its test → thin module (`mod_*`) that calls it → a `dev/run_*.R` harness → wire it into an app.**
 
@@ -52,14 +52,16 @@ To extend it, follow the same path every existing feature took: **pure helper + 
 │   ├── components.R             # UF theme (uf_theme), uf_logo_uri/uf_title, info_tip, label_or, copy_js, UF_BLUE/ORANGE/COLORS
 │   ├── helpers_io.R             # file reading / table-bounds detection
 │   ├── helpers_clean.R          # Data Health detect/fix engine + convert_column
+│   ├── helpers_filter.R         # apply_filters / describe_condition (value-based row filter)
 │   ├── helpers_stats.R          # grouped_summary, column classifiers, profiling
 │   ├── helpers_plot.R           # build_full_plot, chart hints, palettes, code gen, grid export
 │   ├── helpers_model.R          # fit_model, model_interpretation, diagnostic ggplots
 │   ├── helpers_reshape.R        # do_stack/do_split/do_transpose/do_sort/do_subset
-│   └── helpers_combine.R        # do_concatenate/do_join/do_update/compare_tables
+│   ├── helpers_combine.R        # do_concatenate/do_join/do_update/compare_tables
+│   └── helpers_compare.R        # compare_groups_numeric/compare_categorical, assumptions, effect sizes
 ├── modules/                     # mod_<feature>.R, each <feature>UI(id) + <feature>Server(id, ...)
 │   ├── mod_import.R   mod_reshape.R   mod_summarize.R   mod_visualize.R
-│   ├── mod_regression.R   mod_export.R   mod_combine.R
+│   ├── mod_compare.R   mod_regression.R   mod_export.R   mod_combine.R
 ├── apps/
 │   ├── data_explorer/app.R      # full pipeline (all tabs)
 │   ├── reshape_tool/app.R       # import → reshape → export
@@ -69,7 +71,7 @@ To extend it, follow the same path every existing feature took: **pure helper + 
 │   └── run_combine.R
 └── tests/testthat/              # setup.R sources R/; test-<area>.R per helper file
     ├── test-reshape.R  test-io.R  test-stats.R  test-plot.R
-    ├── test-model.R    test-clean.R  test-combine.R
+    ├── test-model.R    test-clean.R  test-combine.R  test-compare.R  test-filter.R
 ```
 
 ---

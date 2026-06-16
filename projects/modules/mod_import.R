@@ -50,6 +50,11 @@ importUI <- function(id,
       card_header(icon("right-left"), " Change variable types"),
       uiOutput(ns("convert_ui"))
     ),
+    card(
+      card_header(icon("filter"), " Filter rows"),
+      uiOutput(ns("filter_builder")),
+      uiOutput(ns("filter_active"))
+    ),
     layout_columns(
       col_widths = c(8, 4),
       card(
@@ -94,7 +99,12 @@ importServer <- function(id, examples = NULL) {
     # data_raw = exactly as loaded, so "Revert to original" can restore it
     rv <- reactiveValues(data = NULL, data_raw = NULL, upload = NULL,
                          sheets = NULL, loaded_sheet = NULL, source = NULL,
-                         file_token = 0L)
+                         file_token = 0L, filters = list())
+
+    # Local type predicates (kept here so this module needn't source helpers_plot;
+    # reshape_tool / combine_tool don't attach it).
+    is_num_col <- function(x) is.numeric(x) && !inherits(x, c("Date", "POSIXct", "POSIXt"))
+    is_date_x  <- function(x) inherits(x, c("Date", "POSIXct", "POSIXt"))
 
     # The file input lives in an output so Clear can re-render an empty one.
     output$file_ui <- renderUI({
@@ -114,7 +124,7 @@ importServer <- function(id, examples = NULL) {
         d <- read_file_data(u$path, u$ext, header = input$header,
                             sep = input$sep, dec = input$dec,
                             sheet = sheet %||% 1)
-        rv$data <- d; rv$data_raw <- d
+        rv$data <- d; rv$data_raw <- d; rv$filters <- list()
         rv$loaded_sheet <- sheet; rv$source <- u$name
         nh <- attr(d, "n_skip_head") %||% 0L
         nt <- attr(d, "n_skip_tail") %||% 0L
@@ -160,7 +170,7 @@ importServer <- function(id, examples = NULL) {
     observeEvent(input$load_example, {
       req(input$example)
       d <- examples[[input$example]]
-      rv$data <- d; rv$data_raw <- d
+      rv$data <- d; rv$data_raw <- d; rv$filters <- list()
       rv$upload <- NULL; rv$sheets <- NULL; rv$loaded_sheet <- NULL
       rv$source <- paste0("example: ", input$example)
       showNotification(paste("Loaded example:", input$example), type = "message")
@@ -168,7 +178,7 @@ importServer <- function(id, examples = NULL) {
 
     observeEvent(input$clear_data, {
       rv$data <- NULL; rv$data_raw <- NULL; rv$upload <- NULL; rv$sheets <- NULL
-      rv$loaded_sheet <- NULL; rv$source <- NULL
+      rv$loaded_sheet <- NULL; rv$source <- NULL; rv$filters <- list()
       rv$file_token <- rv$file_token + 1L     # forces the file input to reset
       showNotification("Cleared the loaded data.", type = "message")
     })
@@ -276,10 +286,132 @@ importServer <- function(id, examples = NULL) {
                        duration = 6)
     })
 
-    # ── At-a-glance summary + column profile ──────────────────
-    output$glance_ui <- renderUI({
+    # ── Filter rows (value-based; multiple conditions AND'd) ──
+    # filtered() = the working copy with the active conditions applied. This is
+    # what flows downstream and what the preview/summary/profile below describe.
+    filtered <- reactive({
+      d <- rv$data
+      if (is.null(d)) return(NULL)
+      apply_filters(d, rv$filters)
+    })
+
+    output$filter_builder <- renderUI({
+      if (is.null(rv$data))
+        return(helpText("Load a dataset to filter its rows."))
+      tagList(
+        tags$p(class = "mb-2",
+          "Keep only the rows that match your conditions — add as many as you ",
+          "like and they combine with ", tags$b("AND"), "."),
+        layout_columns(
+          col_widths = c(4, 4, 4),
+          selectInput(ns("filter_col"), "Column", choices = names(rv$data)),
+          uiOutput(ns("ui_filter_op")),
+          uiOutput(ns("ui_filter_val"))
+        ),
+        actionButton(ns("filter_add"), "Add filter",
+                     class = "btn-primary btn-sm", icon = icon("plus"))
+      )
+    })
+
+    output$ui_filter_op <- renderUI({
+      req(rv$data, input$filter_col %in% names(rv$data))
+      x  <- rv$data[[input$filter_col]]
+      ch <- if (is_num_col(x))
+              c("is between" = "between", "is ≥" = ">=", "is ≤" = "<=",
+                "is >" = ">", "is <" = "<", "equals" = "==", "does not equal" = "!=")
+            else if (is_date_x(x)) c("is between" = "between")
+            else c("is any of" = "in", "is none of" = "not_in",
+                   "contains text" = "contains")
+      selectInput(ns("filter_op"), "Condition", choices = ch)
+    })
+
+    output$ui_filter_val <- renderUI({
+      req(rv$data, input$filter_col %in% names(rv$data), input$filter_op)
+      x <- rv$data[[input$filter_col]]; op <- input$filter_op
+      if (is_num_col(x)) {
+        rng <- suppressWarnings(range(x, na.rm = TRUE))
+        if (!all(is.finite(rng))) rng <- c(0, 0)
+        if (identical(op, "between"))
+          tagList(
+            numericInput(ns("filter_v1"), "From", value = signif(rng[1], 4)),
+            numericInput(ns("filter_v2"), "To",   value = signif(rng[2], 4)))
+        else
+          numericInput(ns("filter_v1"), "Value", value = signif(rng[1], 4))
+      } else if (is_date_x(x)) {
+        rng <- range(as.Date(x), na.rm = TRUE)
+        dateRangeInput(ns("filter_dates"), "Between", start = rng[1], end = rng[2])
+      } else {
+        if (identical(op, "contains"))
+          textInput(ns("filter_text"), "Contains", placeholder = "text to match")
+        else
+          selectizeInput(ns("filter_vals"), "Values",
+            choices = sort(unique(as.character(x))), multiple = TRUE,
+            options = list(placeholder = "pick one or more"))
+      }
+    })
+
+    # Assemble a condition from the builder inputs and append it.
+    observeEvent(input$filter_add, {
+      req(rv$data, input$filter_col %in% names(rv$data), input$filter_op)
+      x <- rv$data[[input$filter_col]]; op <- input$filter_op
+      cond <- list(col = input$filter_col, op = op); ok <- TRUE
+      if (is_num_col(x)) {
+        if (identical(op, "between")) {
+          if (is.null(input$filter_v1) || is.null(input$filter_v2)) ok <- FALSE
+          else cond$value <- c(input$filter_v1, input$filter_v2)
+        } else if (is.null(input$filter_v1)) ok <- FALSE
+        else cond$value <- input$filter_v1
+      } else if (is_date_x(x)) {
+        cond$op <- "between"; cond$value <- as.character(input$filter_dates)
+      } else if (identical(op, "contains")) {
+        if (!nzchar(input$filter_text %||% "")) ok <- FALSE
+        else cond$value <- input$filter_text
+      } else {
+        if (!length(input$filter_vals)) ok <- FALSE
+        else cond$value <- input$filter_vals
+      }
+      if (!ok) {
+        showNotification("Choose a value for this filter.", type = "warning"); return()
+      }
+      rv$filters <- c(rv$filters, list(cond))
+    })
+
+    observeEvent(input$filter_clear, { rv$filters <- list() })
+
+    # Bounded pool of remove-buttons (supports up to 20 active filters).
+    for (i in seq_len(20)) local({
+      ii <- i
+      observeEvent(input[[paste0("rmfilter_", ii)]], {
+        if (ii <= length(rv$filters)) rv$filters[[ii]] <- NULL
+      }, ignoreInit = TRUE)
+    })
+
+    output$filter_active <- renderUI({
       req(rv$data)
-      g   <- data_glance(rv$data)
+      n <- nrow(rv$data); m <- nrow(filtered())
+      count_txt <- div(
+        class = sprintf("mt-2 fw-semibold %s", if (m < n) "text-primary" else "text-muted"),
+        sprintf("Keeping %s of %s rows.", format(m, big.mark = ","),
+                format(n, big.mark = ",")))
+      if (!length(rv$filters))
+        return(tagList(tags$hr(),
+          helpText("No filters yet — all rows pass through."), count_txt))
+      chips <- lapply(seq_along(rv$filters), function(i)
+        div(class = "d-flex align-items-center gap-2 mb-1",
+            tags$span(class = "badge text-bg-primary",
+                      describe_condition(rv$filters[[i]])),
+            actionButton(ns(paste0("rmfilter_", i)), label = NULL,
+                         icon = icon("xmark"),
+                         class = "btn btn-sm btn-outline-danger py-0 px-1")))
+      tagList(tags$hr(), tags$b("Active filters:"), chips,
+              actionButton(ns("filter_clear"), "Clear all", icon = icon("trash"),
+                           class = "btn-outline-secondary btn-sm mt-1"),
+              count_txt)
+    })
+
+    # ── At-a-glance summary + column profile (of the filtered data) ──
+    output$glance_ui <- renderUI({
+      req(filtered()); g <- data_glance(filtered())
       pct <- if (g$n) round(100 * g$complete / g$n) else 0
       tags$ul(
         class = "list-unstyled small mb-2",
@@ -293,11 +425,11 @@ importServer <- function(id, examples = NULL) {
       )
     })
 
-    output$summary_raw <- renderPrint({ req(rv$data); summary(rv$data) })
+    output$summary_raw <- renderPrint({ req(filtered()); summary(filtered()) })
 
     output$profile <- DT::renderDT({
-      req(rv$data)
-      DT::datatable(column_profile(rv$data), rownames = FALSE,
+      d <- filtered(); req(is.data.frame(d), nrow(d) >= 1L)
+      DT::datatable(column_profile(d), rownames = FALSE,
                     class = "compact stripe",
                     options = list(scrollX = TRUE, pageLength = 12, dom = "tip"))
     })
@@ -306,16 +438,22 @@ importServer <- function(id, examples = NULL) {
       d <- rv$data
       if (is.null(d))
         return("No data loaded yet — upload a file or load an example.")
-      sprintf("%s — %s rows × %s columns", rv$source %||% "data",
-              format(nrow(d), big.mark = ","), ncol(d))
+      fd  <- filtered()
+      txt <- sprintf("%s — %s rows × %s columns", rv$source %||% "data",
+                     format(nrow(fd), big.mark = ","), ncol(fd))
+      if (nrow(fd) < nrow(d))
+        txt <- paste0(txt, sprintf("  (filtered from %s)",
+                                   format(nrow(d), big.mark = ",")))
+      txt
     })
 
     output$preview <- DT::renderDT({
-      req(rv$data)
-      DT::datatable(utils::head(rv$data, 200), rownames = FALSE,
+      d <- filtered(); req(is.data.frame(d))
+      DT::datatable(utils::head(d, 200), rownames = FALSE,
                     options = list(pageLength = 10, scrollX = TRUE))
     })
 
-    reactive(rv$data)
+    # Pattern A: the next stage reads the FILTERED working data.
+    filtered
   })
 }

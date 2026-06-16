@@ -110,14 +110,18 @@ The tabs run left to right, and **each one feeds the next**:
 
 1. **Import** — load a CSV/Excel/TSV/RDS file (or a built-in example). The
    **Data Health** panel flags common problems (stray text, blank rows, etc.)
-   as one-click, reversible fixes; **Change Variable Types** recasts a column.
+   as one-click, reversible fixes; **Change Variable Types** recasts a column;
+   **Filter rows** keeps only the rows matching conditions you set (e.g. team is
+   any of LAL/BOS, points ≥ 20) — everything downstream uses the filtered data.
 2. **Reshape** *(optional)* — Stack, Split, Transpose, Sort, or Subset. Leave it
    on **None** to pass your data through untouched.
 3. **Summarize** — counts/means/medians/SD/SE/IQR by group, or **Proportions**
    (percent of each category, with confidence intervals).
 4. **Visualize** — up to four charts at once, with a "copy the R code" button.
-5. **Regression** — fit a model and read a plain-English interpretation.
-6. **Export** — download your data, charts, or model results.
+5. **Compare Groups** — t-test / ANOVA (or non-parametric) across groups, or a
+   chi-square between two categories, with assumption checks and effect sizes.
+6. **Regression** — fit a model and read a plain-English interpretation.
+7. **Export** — download your data, charts, summary, or model results.
 
 Whatever you do on Import + Reshape is the data the rest of the app uses.
 

@@ -503,7 +503,8 @@ build_full_plot <- function(df, p) {
       p_obj <- p_obj + (if (is_sqrt) scale_y_sqrt() else scale_y_log10())
   }
 
-  if (!is.null(facet_v) && dplyr::n_distinct(df[[facet_v]]) <= 30)
+  faceted <- !is.null(facet_v) && dplyr::n_distinct(df[[facet_v]]) <= 30
+  if (faceted)
     p_obj <- p_obj + facet_wrap(vars(.data[[facet_v]]))
 
   if (isTRUE(p$flip)) p_obj <- p_obj + coord_flip()
@@ -522,6 +523,14 @@ build_full_plot <- function(df, p) {
     base_theme <- base_theme + theme(panel.grid = element_blank())
   if (needs_x_rotation(df, pt, xv) && !isTRUE(p$flip))
     base_theme <- base_theme + theme(axis.text.x = element_text(angle = 40, hjust = 1))
+  # Small multiples get breathing room: space between panels, compact bold strip
+  # labels on a light band, so faceted charts stay legible when packed together.
+  if (faceted)
+    base_theme <- base_theme + theme(
+      panel.spacing    = grid::unit(0.9, "lines"),
+      strip.text       = element_text(size = 9, face = "bold",
+                                      margin = margin(3, 3, 3, 3)),
+      strip.background = element_rect(fill = "#eef1f5", color = NA))
 
   p_obj + base_theme + labs(
     title = title, subtitle = subtitle, x = xlab, y = ylab,
@@ -846,4 +855,36 @@ render_plots_to_file <- function(plots, file, fmt, w_each, h_each, dpi) {
     grDevices::png(file, width = W, height = H, units = "in", res = dpi))
   on.exit(grDevices::dev.off())
   draw_plot_grid(plots)
+}
+
+# --- plotly post-processing (interactive view only) -------------------------
+# ggplotly() doesn't carry over a few things ggplot got right; these patch the
+# converted plotly object so the interactive preview matches the static export.
+
+# Translate a ggplot legend.position into a plotly layout `legend` list. plotly
+# ignores ggplot's top/bottom placement (it always draws the legend on the
+# right), so we reposition it explicitly. Returns NULL when the default (right)
+# is correct or the legend is hidden ("none" is already honoured by ggplotly).
+plotly_legend_layout <- function(pos) {
+  switch(pos %||% "right",
+    bottom = list(orientation = "h", x = 0.5, xanchor = "center",
+                  y = -0.2, yanchor = "top"),
+    top    = list(orientation = "h", x = 0.5, xanchor = "center",
+                  y = 1.1,  yanchor = "bottom"),
+    NULL)
+}
+
+# ggplotly() names a dodged/grouped trace "(level,1)" — the trailing ",1" is the
+# panel index, which then leaks into the legend (e.g. a fill of cyl shows
+# "(4,1)", "(6,1)", "(8,1)" instead of "4", "6", "8"). Strip it back to just the
+# level, leaving already-clean trace names untouched.
+clean_plotly_trace_names <- function(ply) {
+  if (is.null(ply$x$data)) return(ply)
+  ply$x$data <- lapply(ply$x$data, function(tr) {
+    nm <- tr$name
+    if (!is.null(nm) && length(nm) == 1L && grepl("^\\(.*,\\s*-?\\d+\\)$", nm))
+      tr$name <- sub("^\\((.*),\\s*-?\\d+\\)$", "\\1", nm)
+    tr
+  })
+  ply
 }

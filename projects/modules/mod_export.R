@@ -6,13 +6,15 @@
 # regression results (when a `model` reactive is supplied, e.g. from
 # mod_regression). Pattern A terminal stage: returns nothing.
 #
-# exportServer(id, data_in, plots = NULL, model = NULL)
-#   data_in : reactive(data frame | NULL)
-#   plots   : reactive(list of ggplots) | NULL   -> shows a "Export charts" block
-#   model   : reactive(lm | NULL)        | NULL   -> shows a "Export regression" block
+# exportServer(id, data_in, plots = NULL, model = NULL, summary_tbl = NULL)
+#   data_in     : reactive(data frame | NULL)
+#   plots       : reactive(list of ggplots) | NULL -> shows an "Export charts" block
+#   model       : reactive(lm | NULL)        | NULL -> shows an "Export regression" block
+#   summary_tbl : reactive(data frame | NULL)| NULL -> shows an "Export summary" block
 #
 # The chart export needs render_plots_to_file() (helpers_plot.R) and ggplot2;
-# only the apps that pass `plots` (data_explorer) attach those.
+# the regression preview needs model_interpretation() (helpers_model.R). Only the
+# app that passes those reactives (data_explorer) attaches/sources them.
 
 exportUI <- function(id) {
   ns <- NS(id)
@@ -30,6 +32,7 @@ exportUI <- function(id) {
       downloadButton(ns("download"), "Download data", class = "btn-primary w-100"),
       helpText("Downloads the data exactly as it stands at this point in the ",
                "pipeline."),
+      uiOutput(ns("summary_ui")),  # filled only when a summary reactive is given
       uiOutput(ns("charts_ui")),   # filled only when a plots reactive is given
       uiOutput(ns("model_ui"))     # filled only when a model reactive is given
     ),
@@ -38,11 +41,14 @@ exportUI <- function(id) {
       textOutput(ns("caption")),
       DT::DTOutput(ns("preview"))
     ),
-    uiOutput(ns("charts_preview_ui"))   # filled only when a plots reactive is given
+    uiOutput(ns("summary_preview_ui")), # filled only when a summary reactive is given
+    uiOutput(ns("charts_preview_ui")),  # filled only when a plots reactive is given
+    uiOutput(ns("model_preview_ui"))    # filled only when a model reactive is given
   )
 }
 
-exportServer <- function(id, data_in, plots = NULL, model = NULL) {
+exportServer <- function(id, data_in, plots = NULL, model = NULL,
+                         summary_tbl = NULL) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
@@ -78,6 +84,37 @@ exportServer <- function(id, data_in, plots = NULL, model = NULL) {
           rds  = saveRDS(d, file))
       }
     )
+
+    # ── Optional: export + preview the summary table (from mod_summarize) ──
+    if (!is.null(summary_tbl)) {
+      summ_or_null <- function() tryCatch(summary_tbl(), error = function(e) NULL)
+      output$summary_ui <- renderUI({
+        tagList(
+          hr(), h6("Export summary"),
+          downloadButton(ns("dl_summary"), "Summary table (.csv)",
+                         class = "btn-outline-secondary w-100")
+        )
+      })
+      output$summary_preview_ui <- renderUI({
+        card(card_header(icon("layer-group"), " Summary preview"),
+             DT::DTOutput(ns("summary_preview")))
+      })
+      output$summary_preview <- DT::renderDT({
+        d <- summ_or_null()
+        validate(need(is.data.frame(d) && nrow(d) >= 1L,
+                      "Build a summary on the Summarize tab to preview it here."))
+        DT::datatable(d, rownames = FALSE, class = "compact stripe",
+                      options = list(scrollX = TRUE, pageLength = 10, dom = "tip"))
+      })
+      output$dl_summary <- downloadHandler(
+        filename = function() paste0(safe_stem(), "_summary.csv"),
+        content  = function(f) {
+          d <- summ_or_null()
+          validate(need(is.data.frame(d), "No summary to export yet."))
+          utils::write.csv(d, f, row.names = FALSE)
+        }
+      )
+    }
 
     # ── Optional: export charts (from mod_visualize) ──────────
     if (!is.null(plots)) {
@@ -133,9 +170,53 @@ exportServer <- function(id, data_in, plots = NULL, model = NULL) {
           downloadButton(ns("dl_fitted"), "Fitted & actual (.csv)",
                          class = "btn-outline-secondary w-100 mb-1"),
           downloadButton(ns("dl_resid"), "Residuals (.csv)",
-                         class = "btn-outline-secondary w-100")
+                         class = "btn-outline-secondary w-100 mb-2"),
+          selectInput(ns("reg_plot_fmt"), "Diagnostic plot format",
+                      choices = c("PNG" = "png", "PDF" = "pdf")),
+          downloadButton(ns("dl_reg_plots"), "Diagnostic plots",
+                         class = "btn-success w-100")
         )
       })
+      # Preview the fitted model so Export mirrors the Regression tab.
+      output$model_preview_ui <- renderUI({
+        card(card_header(icon("chart-simple"), " Regression preview"),
+             verbatimTextOutput(ns("model_preview_text")),
+             uiOutput(ns("model_preview_interp")),
+             tags$h6(class = "mt-2", "Diagnostic plots"),
+             plotOutput(ns("model_preview_plots"), height = "320px"))
+      })
+      # The two diagnostic ggplots, side by side (Fitted vs Actual, Residuals).
+      reg_diag_plots <- function(m) list(reg_fitted_gg(m), reg_resid_gg(m))
+      output$model_preview_plots <- renderPlot({
+        m <- tryCatch(model(), error = function(e) NULL)
+        validate(need(!is.null(m),
+                      "Fit a model on the Regression tab to preview its plots."))
+        draw_plot_grid(reg_diag_plots(m))
+      }, bg = "white")
+      output$model_preview_text <- renderPrint({
+        m <- tryCatch(model(), error = function(e) NULL)
+        if (is.null(m)) cat("Fit a model on the Regression tab to preview it here.\n")
+        else            summary(m)
+      })
+      output$model_preview_interp <- renderUI({
+        m <- tryCatch(model(), error = function(e) NULL)
+        if (is.null(m)) return(NULL)
+        info <- model_interpretation(m)
+        op   <- info$overall_p
+        p_label <- if (!is.na(op)) {
+          if (op < 0.001) "p < 0.001" else paste0("p = ", round(op, 4))
+        } else "p = N/A"
+        sig <- !is.na(op) && op < 0.05
+        tags$p(class = "mt-2 mb-1",
+          tags$b(sprintf("R² = %s", info$r2)),
+          sprintf(" — explains %s%% of the variance. ", round(info$r2 * 100, 1)),
+          tags$span(
+            style = sprintf("color:%s; font-weight:600;",
+                            if (sig) "#2e7d32" else "#c62828"),
+            if (sig) sprintf("Overall model is significant (%s).", p_label)
+            else     sprintf("Overall model is not significant (%s).", p_label)))
+      })
+
       need_model <- function()
         validate(need(!is.null(model()), "Fit a model on the Regression tab first."))
       output$dl_summary <- downloadHandler(
@@ -165,6 +246,15 @@ exportServer <- function(id, data_in, plots = NULL, model = NULL) {
           need_model(); m <- model()
           utils::write.csv(data.frame(fitted = fitted(m), residual = residuals(m)),
                            f, row.names = FALSE)
+        }
+      )
+      output$dl_reg_plots <- downloadHandler(
+        filename = function()
+          paste0(safe_stem(), "_regression_diagnostics.", input$reg_plot_fmt %||% "png"),
+        content  = function(file) {
+          need_model()
+          render_plots_to_file(reg_diag_plots(model()), file,
+                               input$reg_plot_fmt %||% "png", 6, 4.5, 150)
         }
       )
     }

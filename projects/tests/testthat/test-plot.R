@@ -102,3 +102,28 @@ test_that("bq backticks only non-syntactic names; qq quotes", {
   expect_equal(bq("my var"), "`my var`")
   expect_equal(qq("hi"), '"hi"')
 })
+
+# ---- plotly post-processing helpers -----------------------------------------
+
+test_that("plotly_legend_layout repositions only top/bottom", {
+  expect_null(plotly_legend_layout("right"))   # default needs no override
+  expect_null(plotly_legend_layout("none"))    # hidden handled by ggplotly
+  expect_null(plotly_legend_layout(NULL))
+  expect_equal(plotly_legend_layout("bottom")$orientation, "h")
+  expect_equal(plotly_legend_layout("top")$orientation, "h")
+})
+
+test_that("clean_plotly_trace_names strips the leaked panel index", {
+  ply <- list(x = list(data = list(
+    list(name = "(4,1)"), list(name = "(6,1)"),
+    list(name = "8"),     list(name = NULL))))
+  out <- clean_plotly_trace_names(ply)
+  expect_equal(out$x$data[[1]]$name, "4")
+  expect_equal(out$x$data[[2]]$name, "6")
+  expect_equal(out$x$data[[3]]$name, "8")      # already clean -> untouched
+  expect_null(out$x$data[[4]]$name)            # NULL name -> left alone
+})
+
+test_that("clean_plotly_trace_names tolerates a plot with no traces", {
+  expect_equal(clean_plotly_trace_names(list(x = list())), list(x = list()))
+})

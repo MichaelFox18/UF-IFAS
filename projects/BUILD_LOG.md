@@ -4,6 +4,51 @@ Running notes on the AI-assisted "document then rebuild" workflow: what worked, 
 
 ---
 
+## 2026-06-16 — New feature: row Filter (in the Import tab)
+
+Michael hit a real gap testing a large NBA-stats dataset: there was no value-based row filter (Reshape→Subset only does random sampling + column-keep). Chose to put filtering **inside the Import tab** so Import is the one "get your data ready" stage (load → Data Health → recast → filter). Built as a shared module feature, so all three apps gain it.
+
+- **`R/helpers_filter.R` (pure base R).** `apply_filters(df, conditions)` AND's a list of conditions; each is a plain `list(col, op, value)`. Operators by type: numeric `between / >= / <= / > / < / == / !=`, date `between`, categorical `in / not_in / contains` (case-insensitive literal substring). NA rows drop (like dplyr::filter); unknown columns / unusable values are no-ops, never errors, so a half-built or stale condition can't break the pipeline. `describe_condition()` renders the chip text. `filter_mask()` is the per-condition helper. **Gotcha:** `grepl(fixed=TRUE)` ignores `ignore.case` (and warns) — did case-insensitive `contains` by lower-casing both sides.
+- **`tests/testthat/test-filter.R`** — 18 expectations (numeric/between/in/not_in/contains, AND of conditions, NA drop, empty/unknown-column no-ops, describe_condition). **Suite 190 green** (was 176).
+- **`mod_import` Filter panel.** New "Filter rows" card: a type-aware builder (column → operator adapts to type → value input(s)), an "Add filter" button, removable filter chips, "Clear all", and a live **"Keeping M of N rows"** counter. State lives in `rv$filters`; a bounded pool of 20 remove-observers handles per-chip deletion (the fixed-pool pattern avoids dynamic-observer double-firing). `filtered()` = `apply_filters(rv$data, rv$filters)` and is now what the module **returns** and what the preview/profile/summary/caption describe (Data Health + type-recast still operate on the full working copy). Filters reset on load/example/clear. Local `is_num_col`/`is_date_x` predicates keep the module from needing `helpers_plot` (reshape_tool/combine_tool don't attach it).
+- **Wired** `helpers_filter.R` into all three app source blocks (it sits before `mod_import`). The two mini-apps get filtering for free.
+
+PowerShell `testServer` smoke: load mtcars (32) → add `cyl > 5` → 21 rows → clear → 32; all three apps parse. **Next:** Michael to try it on the NBA dataset (e.g. team is any of …, minutes ≥ 20); then report export or the package conversion.
+
+---
+
+## 2026-06-16 — New feature: Compare Groups tab (hypothesis testing)
+
+First net-new feature of the polish phase. Michael chose "Full + chi-square" scope. Built as an analysis stage (a tab, like Regression — *not* a standalone mini-app; that stays a cheap ~50-line wrapper for later if students want it). Followed the house path: pure helper + tests → module → dev harness → wire into the app.
+
+- **`R/helpers_compare.R` (pure base/stats).** `compare_groups_numeric()` picks the test from #groups × parametric flag: Welch/Student t-test (+ Cohen's d) for 2 groups, one-way ANOVA + Tukey HSD (+ eta-squared) for 3+, or Wilcoxon / Kruskal–Wallis non-parametric. Assumptions: `normality_table()` (per-group Shapiro–Wilk, NA where n∉[3,5000] or constant) and `levene_test()` (Brown–Forsythe, median-centred, implemented in base R to avoid a `car` dependency). `compare_categorical()` runs chi-square + Cramér's V with a Monte-Carlo Fisher's-exact fallback when any expected cell < 5. `effect_magnitude()` buckets d/eta²/V into negligible/small/medium/large. All return structured lists/data frames or NULL.
+- **`tests/testthat/test-compare.R`** — 30 expectations checking the helpers against the raw `t.test`/`aov`/`chisq.test` they wrap (p-values equal), the Tukey row count, non-parametric routing, NULL on bad input, Levene flagging unequal variance, and Cramér's V bounds. **Suite 176 green** (was 146).
+- **`modules/mod_compare.R`** — two modes (numeric-by-group / two-categorical) behind a radio; auto-everything (no "which test?" prompt — it's derived). Result card, plain-English verdict (significant or not + effect-size magnitude), assumption-checks card (normality table + Levene, with steer-to-non-parametric warnings), Tukey post-hoc table (ANOVA only), contingency table (cat mode), a reused `build_full_plot` boxplot/bar, and a `.txt` results export. Reuses `numeric_cols`/`groupable_cols` and `build_full_plot`. Gotchas hit: can't embed a `renderDT` inside `renderUI` (needs a `DTOutput` placeholder + separate render); `layout_columns` with a variable card list needs `do.call`, not `!!!`.
+- **`dev/run_compare.R`** — boots the module with iris (ANOVA) + mtcars (chi-square).
+- **Wired into `data_explorer`**: sourced the helper+module, added a "Compare Groups" tab (flask-vial icon) between Visualize and Regression, added it to `fillable`, updated the About workflow list to seven steps.
+
+PowerShell `testServer` smoke: iris ANOVA F-test p≈1.7e-31, eta²=0.62, 3 Tukey rows; Kruskal–Wallis path; mtcars cyl×gear χ²=18.04, p=0.0012, Cramér's V=0.53, Fisher fallback 5e-04; boxplot builds; app.R parses. **Next:** Michael to test the tab in the running app; then either more features (report export was the runner-up) or start the R-package conversion.
+
+---
+
+## 2026-06-16 — Polish phase, round 1 (Data Explorer fixes from testing)
+
+Start of the "polish then package" phase: the boss wants this turned into a real R package, but we agreed to do thorough bug-fixing/tests/final touches first. This is the first batch, all from Michael's testing of `data_explorer` (mtcars).
+
+- **About tab was stale/wrong.** It listed only 4 steps (Import→Reshape→Summarize→Export) and told users "Visualize and Regression are coming" — both have shipped. Rewrote both About cards in `apps/data_explorer/app.R` to cover all six tabs (incl. Data Health, proportions, charts+code, diagnostics) and refreshed the Tips (full-screen button, Data Health). Updated the file header comment too.
+- **Legend position did nothing in the interactive view (only "Hidden" worked).** Root cause: `ggplotly()` ignores ggplot's top/bottom legend placement — it always draws on the right unless hidden. The static PNG/PDF export already respected it, so only the on-screen preview was wrong. Added `plotly_legend_layout()` (helpers_plot.R) mapping the position to a plotly `layout(legend=...)`, applied in `mod_visualize`'s `renderPlotly`. Bottom/top now reposition; right/none unchanged.
+- **Grouped bar legend showed "(4,1)/(6,1)/(8,1)" instead of "4/6/8".** Classic `ggplotly()` dodged-trace naming quirk — the trailing `,1` is the panel index leaking into the legend. Added `clean_plotly_trace_names()` (regex-strips `(level,N)` → `level`, leaves clean names alone), applied in the same `renderPlotly`. Smoke-confirmed: raw `(4,1)|(6,1)|(8,1)` → `4|6|8`.
+- **Faceted charts overlapped/cramped.** Can't fully fix in a 4-up grid, but reduced it: `build_full_plot` now adds `panel.spacing` + compact bold strip labels on a light band when faceting, and `mod_visualize` gives a faceted slot +170px height. Pointed users at the per-card full-screen button (cards already have `full_screen = TRUE`) in the About tips.
+- **Export tab was missing summary + regression previews** (it already previewed data + charts). `exportServer` gained `summary_tbl = NULL`; when supplied it shows a Summary preview (DT) + a "Summary table (.csv)" download, and the model block now renders a Regression preview (model `summary()` printout + a one-line R²/significance headline via `model_interpretation`). Wired `summary_t <- summarizeServer(...)` through to `exportServer` in the app. Blocks are still gated on their reactive, so `reshape_tool`/`combine_tool` are unchanged.
+
+New pure helpers got tests (`test-plot.R`: `plotly_legend_layout`, `clean_plotly_trace_names`, incl. the no-trace edge case). **Suite 146 green** (was 136). PowerShell smoke: faceted boxplot builds with the new theming; grouped-bar trace names clean up; all changed files parse; `exportServer` formals now include `summary_tbl`.
+
+**Same-session follow-up — regression diagnostic plots in Export.** Michael flagged that the Export tab previewed/downloaded the regression *text* but not its graphs. Added them inside `mod_export`'s `model` block: the Regression preview card now renders the two diagnostic ggplots (`reg_fitted_gg` + `reg_resid_gg`) side by side via `draw_plot_grid`, and the Export-regression sidebar gained a PNG/PDF selector + a "Diagnostic plots" download wired through `render_plots_to_file` (6×4.5 each, 150 dpi). Reuses existing tested helpers, so no new unit tests; smoke-confirmed the plots build and a 24 KB PNG writes through the download path. Suite still 146 green.
+
+**Next (polish phase):** test the reshape_tool and combine_tool apps; add committed `testServer` module tests before packaging; then start the R-package conversion.
+
+---
+
 ## 2026-06-09 — Experiment 1: generate the JMP Tables menu spec
 
 **Goal.** Have the AI produce an explanation file of JMP's Tables menu, detailed enough to rebuild in R, as both James's deliverable and the spec for the `reshape` module.

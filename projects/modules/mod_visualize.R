@@ -376,9 +376,13 @@ visualizeServer <- function(id, data_in) {
     output$plots_area <- renderUI({
       req(is.data.frame(data_in()))
       n   <- as.integer(input$n_plots %||% 1)
-      ph  <- if (n == 1) "470px" else "330px"
       big <- nrow(data_in()) > BIG_ROWS
       cards <- lapply(seq_len(n), function(i) {
+        # Faceted (small-multiple) charts need more vertical room to stay legible.
+        fac     <- input[[paste0("mp", i, "_facetvar")]]
+        faceted <- !is.null(fac) && !fac %in% c("", "__none__")
+        base_h  <- if (n == 1) 470 else 330
+        ph      <- paste0(if (faceted) base_h + 170 else base_h, "px")
         plot_ui <- if (big) {
           tagList(
             plotOutput(ns(paste0("mp_st", i)), height = ph),
@@ -428,7 +432,14 @@ visualizeServer <- function(id, data_in) {
           if (!identical(pr$type, "heatmap")) req(pr$x)
           p <- build_full_plot(data_in(), pr)
           req(p)
-          plotly::ggplotly(p) |> plotly::layout(margin = list(t = 55, b = 55))
+          ply <- plotly::ggplotly(p) |>
+            plotly::layout(margin = list(t = 55, b = 55))
+          # ggplotly drops a couple of things ggplot got right — clean the
+          # grouped-trace legend names and honour the chosen legend position.
+          ply <- clean_plotly_trace_names(ply)
+          leg <- plotly_legend_layout(pr$legend_pos)
+          if (!is.null(leg)) ply <- plotly::layout(ply, legend = leg)
+          ply
         })
         output[[paste0("mp_st", idx)]] <- renderPlot({
           req(is.data.frame(data_in()))
